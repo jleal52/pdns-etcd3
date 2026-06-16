@@ -278,15 +278,25 @@ func (dn *dataNode) zonesCount() int {
 }
 
 type domainInfo struct {
-	Zone   string `json:"zone"`
-	Serial int64  `json:"serial"`
+	ID             int64  `json:"id"`
+	Zone           string `json:"zone"`
+	Serial         int64  `json:"serial"`
+	NotifiedSerial int64  `json:"notified_serial"`
+	Kind           string `json:"kind"`
 }
 
 func (dn *dataNode) allDomains(result []domainInfo) []domainInfo {
-	if _, ok := dn.records["SOA"][""]; ok {
-		zone, serial := dn.getQname(), dn.zoneRev()
+	if dn.hasSOA() {
+		zone := dn.getQname()
+		serial := int64(soaWireSerial(dn))
 		dn.Logf(3)("allDomains: found zone %q", zone)("serial", serial)
-		result = append(result, domainInfo{zone, serial})
+		result = append(result, domainInfo{
+			ID:             zoneIDs.id(zone),
+			Zone:           zone,
+			Serial:         serial,
+			NotifiedSerial: int64(zoneIDs.notifiedSerial(zone)),
+			Kind:           "MASTER",
+		})
 	}
 	for _, child := range dn.children {
 		result = child.allDomains(result)

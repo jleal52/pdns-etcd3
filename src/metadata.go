@@ -44,9 +44,13 @@ func (cr *pdnsClientRequest) getDomainInfo() (any, error) {
 			cr.Logf(1, "data")("getDomainInfo: not a zone")(name.normal)
 			return false, nil
 		}
+		zone := data.getQname()
 		return objectType[any]{
-			"zone":   cr.Request.Parameters["name"],
-			"serial": data.zoneRev(),
+			"id":              zoneIDs.id(zone),
+			"zone":            cr.Request.Parameters["name"],
+			"serial":          int64(soaWireSerial(data)),
+			"notified_serial": int64(zoneIDs.notifiedSerial(zone)),
+			"kind":            "MASTER",
 		}, nil
 	})
 }

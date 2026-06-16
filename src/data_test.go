@@ -227,3 +227,23 @@ func TestProcessValues(t *testing.T) {
 		}
 	})
 }
+
+func TestAllDomainsReportsKindAndID(t *testing.T) {
+	zoneIDs = newZoneRegistry()
+	apex := newDataNode(nil, "example", "", false)
+	apex.records["SOA"] = map[string]recordType{"": {content: "ns1 host 1 2 3 4 5"}}
+	apex.maxRev = 7
+	got := apex.allDomains([]domainInfo{})
+	if len(got) != 1 {
+		Fatalf(t, "want 1 domain, got %d", len(got))
+	}
+	if got[0].Kind != "MASTER" {
+		Errorf(t, "kind = %q, want MASTER", got[0].Kind)
+	}
+	if got[0].ID == 0 {
+		Errorf(t, "id not assigned")
+	}
+	if got[0].Serial != 7 {
+		Errorf(t, "serial = %d, want 7", got[0].Serial)
+	}
+}
