@@ -555,8 +555,12 @@ ITEMS:
 			vals[qtype][id] = valueType{item.Key, content, itemVersion}
 			debug3values("stored %v for %s", entryType, target)(content)
 		case metadataEntry:
+			// store on itemData (the node the entry belongs to), NOT on dn (the reload
+			// receiver): a full/parent reload has dn above the zone, so using dn would put
+			// a sub-zone's metadata on the wrong node — breaking soaSerial (FIXED-SERIAL),
+			// PRESIGNED detection and TSIG-ALLOW-AXFR for freshly-created zones.
 			value := string(item.Value)
-			dn.metadata[qtype] = append(dn.metadata[qtype], value)
+			itemData.metadata[qtype] = append(itemData.metadata[qtype], value)
 			debug3values("stored %v for %s", entryType, target)(value)
 		default:
 			dn.Errorf()("unhandled entry type")(entryType)
