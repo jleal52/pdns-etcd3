@@ -98,9 +98,13 @@ func TestWalkZoneAuthFlags(t *testing.T) {
 	apex.records["SOA"] = map[string]recordType{"": {content: "ns1 host 1 2 3 4 5"}}
 	apex.records["NS"] = map[string]recordType{"": {content: "ns1.example."}} // apex NS → auth
 	deleg := newDataNode(apex, "sub", ".", false)
-	deleg.records["NS"] = map[string]recordType{"": {content: "ns1.sub.example."}} // delegation NS → non-auth
-	deleg.records["A"] = map[string]recordType{"": {content: "192.0.2.50"}}        // glue → non-auth
+	deleg.records["NS"] = map[string]recordType{"1": {content: "ns1.sub.example."}} // delegation NS (non-empty id) → non-auth
+	deleg.records["A"] = map[string]recordType{"": {content: "192.0.2.50"}}         // glue → non-auth
+	deleg.records["DS"] = map[string]recordType{"": {content: "12345 8 2 abcd"}}    // DS at delegation → stays auth
 	apex.children["sub"] = deleg
+	below := newDataNode(deleg, "host", ".", false)
+	below.records["A"] = map[string]recordType{"": {content: "192.0.2.51"}} // below delegation → non-auth
+	deleg.children["host"] = below
 
 	var result []objectType[any]
 	apex.RLock(false)
@@ -119,5 +123,11 @@ func TestWalkZoneAuthFlags(t *testing.T) {
 	}
 	if authByContent["192.0.2.50"] != false {
 		Errorf(t, "glue A must be non-auth")
+	}
+	if authByContent["12345 8 2 abcd"] != true {
+		Errorf(t, "DS at delegation must stay auth")
+	}
+	if authByContent["192.0.2.51"] != false {
+		Errorf(t, "record below delegation must be non-auth")
 	}
 }

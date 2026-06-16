@@ -150,8 +150,10 @@ func (dn *dataNode) walkZoneRecords(pdnsVersion uint, result *[]objectType[any])
 // a delegation point (a non-apex node with NS but no SOA) are non-authoritative (auth=false)
 // — i.e. the delegation's NS and any glue A/AAAA, and everything beneath it.
 func (dn *dataNode) walkZoneRecordsAuth(pdnsVersion uint, belowDelegation bool, result *[]objectType[any]) {
-	_, isDelegation := dn.records["NS"][""]
-	isDelegation = isDelegation && !dn.hasSOA() // apex has NS+SOA and stays authoritative
+	// NS records are stored keyed by non-empty id (NS#1, NS#first, ...), so detect a
+	// delegation by the presence of any NS record at this node, excluding the apex
+	// (apex has NS+SOA and stays authoritative).
+	isDelegation := len(dn.records["NS"]) > 0 && !dn.hasSOA()
 	qname := dn.getName()
 	for qtype, byID := range dn.records {
 		for _, record := range byID {
