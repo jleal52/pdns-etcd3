@@ -955,6 +955,196 @@ func TestPDNSAXFR(t *testing.T) {
 	}
 }
 
+// TestPDNSAXFRTSIG proves TSIG-secured AXFR end-to-end: a TSIG-signed transfer
+// SUCCEEDS, and an UNSIGNED transfer is REFUSED when access is gated only by TSIG
+// (no allow-axfr-ips). It is a close variant of TestPDNSAXFR.
+//
+// Naming: the test MUST be prefixed "TestPDNS" so CI's `-run PDNS` matrix job runs
+// it across the PDNS-version matrix; an unprefixed name would be silently skipped.
+//
+// TSIG key-name consistency (the central correctness concern): the same FQDN string
+// "axfrkey." is used in all THREE places that must agree —
+//  1. the etcd key holding the secret:  <prefix>-tsig-/axfrkey.
+//  2. the zone metadata value:          TSIG-ALLOW-AXFR = ["axfrkey."]
+//  3. the dns client TsigSecret map key + SetTsig name: "axfrkey."
+//
+// miekg/dns requires the TsigSecret map key to be a canonical FQDN (lowercase, with
+// trailing dot) — see dns.Transfer.TsigSecret docs — so "axfrkey." is mandatory on the
+// client side; we mirror that dotted form everywhere for consistency.
+//
+// HEDGE / ASSUMPTION (CI validates): PowerDNS canonicalizes TSIG names as DNSNames and
+// it is not 100%-certain from outside whether it sends the `getTSIGKey` `name` parameter
+// (and looks up the etcd key) WITH or WITHOUT the trailing dot. To be robust against
+// both, the secret is seeded into etcd under BOTH "axfrkey." and "axfrkey" (harmless —
+// -tsig- entries are never stored in the tree nor affect any serial). If CI shows only
+// one form is consulted, the other seed is simply unused.
+func TestPDNSAXFRTSIG(t *testing.T) {
+	defer recoverPanicsT(t)
+	// TSIG material: a fixed, valid HMAC-SHA256 secret (base64 of exactly 32 bytes).
+	const (
+		tsigKeyName = "axfrkey."                                     // canonical FQDN, used identically in all 3 places
+		tsigAlgo    = "hmac-sha256"                                  // etcd/PDNS algorithm token (no trailing dot)
+		tsigSecret  = "cGUzLWF4ZnItdHNpZy1zZWNyZXQtMzJieXRlcy1rZXk=" // base64 of 32 bytes
+	)
+	// ETCD
+	etcd, err := startETCD(t)
+	fatalOnErr(t, "start ETCD container", err)
+	defer etcd.Terminate()
+	Logf(t, "ETCD endpoint (2379): %s", etcd.Endpoint)
+	// PDNS-ETCD3
+	sleepT(t, 1*time.Second)
+	pe3 := startPE3(t, etcd.Endpoint, "", "-log-level=10;data.values=2", "-pdns-version="+getenvT("PDNS_VERSION", fmt.Sprintf("%d", defaultPdnsVersion))[:1])
+	defer pe3.Terminate()
+	Logf(t, "PDNS-ETCD3 endpoint: %s", pe3.HttpAddress)
+	err = waitFor(t, "PE3 ready", func() bool { return status.serving }, 10*time.Millisecond, 30*time.Second)
+	fatalOnErr(t, "wait for PE3 ready", err)
+	sleepT(t, 1*time.Second)
+	// seed zone example.net. (same shape as TestPDNSAXFR) PLUS the TSIG key and the
+	// TSIG-ALLOW-AXFR metadata gating AXFR by that key name.
+	put := func(key, value string) clientv3.Op {
+		return putOp(pe3.Prefix+key, value)
+	}
+	rev := txnT(t,
+		put("-defaults-", `{ttl: "1h"}`),
+		put("-defaults-/SOA", "---\nrefresh: 1h\nretry: 30m\nexpire: 604800\nneg-ttl: 10m\nprimary: ns1\nmail: horst.master\n"),
+		put("net.example/-options-/A", `{"ip-prefix": [192, 0, 2]}`),
+		put("net.example/SOA", `{}`),
+		put("net.example/NS#first", `="ns1"`),
+		put("net.example/ns1/A", `=2`), // ns1.example.net. A 192.0.2.2
+		put("net.example/www/A", `=1`), // www.example.net. A 192.0.2.1
+		// TSIG key: <prefix>-tsig-/<name> = "<algorithm> <base64-secret>"
+		// (read on demand by getTSIGKey; never stored in the data tree). Seed both the
+		// dotted and undotted name forms so the test is robust to PDNS canonicalization.
+		put(tsigKey+keySeparator+tsigKeyName, tsigAlgo+" "+tsigSecret),                          // -tsig-/axfrkey.
+		put(tsigKey+keySeparator+strings.TrimSuffix(tsigKeyName, "."), tsigAlgo+" "+tsigSecret), // -tsig-/axfrkey
+		// zone metadata TSIG-ALLOW-AXFR (key form <zone>/-metadata-/<KEY>#<id>, value verbatim).
+		put("net.example/"+metadataKey+keySeparator+"TSIG-ALLOW-AXFR#1", tsigKeyName), // = "axfrkey."
+	)
+	waitForRevision(t, rev, "zone + TSIG data loaded")
+	// PDNS primary mode, AXFR gated by TSIG ONLY (deliberately NO allow-axfr-ips, so an
+	// unsigned transfer must be refused; a TSIG-signed one is allowed via TSIG-ALLOW-AXFR).
+	// master=yes since 3.4; primary=yes since 4.5 (4.5+ accepts master=yes as deprecated
+	// alias, so both being set is harmless). Metadata is reachable via getdomainmetadata
+	// and metadata caching is already disabled in startPDNS, so PDNS consults
+	// TSIG-ALLOW-AXFR + getTSIGKey automatically — no extra "enable TSIG" setting needed.
+	pdns, err := startPDNS(t, map[string]string{
+		"master=yes":  "34",
+		"primary=yes": "45",
+	})
+	fatalOnErr(t, "start PDNS container", err)
+	defer pdns.Terminate()
+	Logf(t, "PDNS endpoint: %s", pdns.Endpoint)
+	zone := "example.net."
+
+	// --- Positive: TSIG-signed AXFR must SUCCEED ---
+	t.Run("signed", func(t *testing.T) {
+		tr := &dns.Transfer{
+			DialTimeout: 10 * time.Second,
+			ReadTimeout: 10 * time.Second,
+			TsigSecret:  map[string]string{tsigKeyName: tsigSecret},
+		}
+		m := new(dns.Msg)
+		m.SetAxfr(zone)
+		m.SetTsig(tsigKeyName, dns.HmacSHA256, 300, time.Now().Unix())
+		ch, err := tr.In(m, pdns.Endpoint)
+		fatalOnErr(t, "start signed AXFR", err)
+		var rrs []dns.RR
+		for env := range ch {
+			if env.Error != nil {
+				Fatalf(t, "signed AXFR envelope error: %s", env.Error)
+			}
+			rrs = append(rrs, env.RR...)
+		}
+		Logf(t, "signed AXFR transferred %d RRs", len(rrs))
+		for _, rr := range rrs {
+			Logf(t, "  %s", rr)
+		}
+		// must be SOA-bracketed and contain the seeded records
+		if len(rrs) < 2 {
+			Fatalf(t, "signed AXFR returned too few records: %d", len(rrs))
+		}
+		if _, ok := rrs[0].(*dns.SOA); !ok {
+			Errorf(t, "signed AXFR must start with SOA, got %s", rrs[0])
+		}
+		if _, ok := rrs[len(rrs)-1].(*dns.SOA); !ok {
+			Errorf(t, "signed AXFR must end with SOA, got %s", rrs[len(rrs)-1])
+		}
+		var soaCount, nsCount int
+		var foundWWW, foundNS1 bool
+		for _, rr := range rrs {
+			switch v := rr.(type) {
+			case *dns.SOA:
+				soaCount++
+			case *dns.NS:
+				nsCount++
+				if v.Ns != "ns1.example.net." {
+					Errorf(t, "unexpected NS target: %q", v.Ns)
+				}
+			case *dns.A:
+				switch v.Hdr.Name {
+				case "www.example.net.":
+					foundWWW = v.A.String() == "192.0.2.1"
+				case "ns1.example.net.":
+					foundNS1 = v.A.String() == "192.0.2.2"
+				}
+			}
+		}
+		if soaCount < 2 {
+			Errorf(t, "expected at least 2 SOA records (start+end), got %d", soaCount)
+		}
+		if nsCount < 1 {
+			Errorf(t, "expected at least one NS record, got %d", nsCount)
+		}
+		if !foundWWW {
+			Errorf(t, "expected www.example.net. A 192.0.2.1 in signed transfer")
+		}
+		if !foundNS1 {
+			Errorf(t, "expected ns1.example.net. A 192.0.2.2 in signed transfer")
+		}
+	})
+
+	// --- Negative: UNSIGNED AXFR must be REFUSED (the meaningful test) ---
+	t.Run("unsigned", func(t *testing.T) {
+		tr := &dns.Transfer{
+			DialTimeout: 10 * time.Second,
+			ReadTimeout: 10 * time.Second,
+		}
+		m := new(dns.Msg)
+		m.SetAxfr(zone)
+		ch, err := tr.In(m, pdns.Endpoint)
+		if err != nil {
+			// connection-level refusal already counts as "not succeeded"
+			Logf(t, "unsigned AXFR refused at start (expected): %s", err)
+			return
+		}
+		// drain the channel: a refused/unauthorized AXFR yields an envelope error
+		// and/or no usable zone data (notably no closing SOA). Any of these means
+		// "did not succeed".
+		var rrs []dns.RR
+		var sawError bool
+		for env := range ch {
+			if env.Error != nil {
+				sawError = true
+				Logf(t, "unsigned AXFR envelope error (expected): %s", env.Error)
+				continue
+			}
+			rrs = append(rrs, env.RR...)
+		}
+		Logf(t, "unsigned AXFR yielded %d RRs (sawError=%v)", len(rrs), sawError)
+		// Success would be a complete, SOA-bracketed transfer with the zone records.
+		// Assert we did NOT get that.
+		soaBracketed := len(rrs) >= 2
+		if soaBracketed {
+			_, firstSOA := rrs[0].(*dns.SOA)
+			_, lastSOA := rrs[len(rrs)-1].(*dns.SOA)
+			soaBracketed = firstSOA && lastSOA
+		}
+		if !sawError && soaBracketed {
+			Errorf(t, "unsigned AXFR unexpectedly SUCCEEDED (%d RRs, SOA-bracketed); TSIG gating not enforced", len(rrs))
+		}
+	})
+}
+
 func TestUnixListener(t *testing.T) {
 	t.Skip("not implemented yet")
 }
