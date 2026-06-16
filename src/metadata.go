@@ -44,12 +44,12 @@ func (cr *pdnsClientRequest) getDomainInfo() (any, error) {
 			cr.Logf(1, "data")("getDomainInfo: not a zone")(name.normal)
 			return false, nil
 		}
-		zone := data.getQname()
+		id := domainID(data.getQname())
 		return objectType[any]{
-			"id":              zoneIDs.id(zone),
+			"id":              id,
 			"zone":            data.getQname(),
 			"serial":          int64(soaWireSerial(data)),
-			"notified_serial": int64(zoneIDs.notifiedSerial(zone)),
+			"notified_serial": int64(getNotifiedSerial(id)),
 			"kind":            kindMaster,
 		}, nil
 	})
@@ -126,11 +126,26 @@ func (cr *pdnsClientRequest) setNotified() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("bad serial: %s", err)
 	}
-	zone, ok := zoneIDs.name(id)
-	if !ok {
-		return false, fmt.Errorf("unknown domain id %d", id)
+	if err := putNotifiedSerial(id, uint32(serial)); err != nil {
+		return false, fmt.Errorf("failed to persist notified serial: %s", err)
 	}
-	zoneIDs.setNotified(zone, uint32(serial))
-	cr.Logf(2, "main")("setNotified")("zone", zone, "serial", serial)
+	cr.Logf(2, "main")("setNotified")("id", id, "serial", serial)
 	return true, nil
+}
+
+// getAllDomains lists every zone (kind=MASTER) with its serial and persisted notified serial.
+func (cr *pdnsClientRequest) getAllDomains() (any, error) {
+	domains := dataRoot.allDomains([]domainInfo{})
+	notified := getAllNotifiedSerials()
+	for i := range domains {
+		domains[i].NotifiedSerial = int64(notified[domains[i].ID])
+	}
+	return domains, nil
+}
+
+// getUpdatedMasters returns the zones whose serial changed since PowerDNS last notified the
+// secondaries (so PowerDNS sends NOTIFY). The notified serial is read from the shared etcd
+// state, so this works in any run mode (pipe or standalone).
+func (cr *pdnsClientRequest) getUpdatedMasters() (any, error) {
+	return filterUpdated(dataRoot.allDomains([]domainInfo{}), getAllNotifiedSerials()), nil
 }

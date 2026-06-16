@@ -236,13 +236,13 @@ func (cr *pdnsClientRequest) handleRequest(ctx context.Context) {
 	case "setdomainmetadata":
 		result, err = cr.setDomainMetadata(ctx)
 	case "getalldomains":
-		result = dataRoot.allDomains([]domainInfo{}) // must not be nil, for empty answers it would not be marshaled into `[]`
+		result, err = cr.getAllDomains()
 	case "getdomaininfo":
 		result, err = cr.getDomainInfo()
 	case "list":
 		result, err = cr.list()
 	case "getupdatedmasters", "getupdatedprimaries":
-		result = dataRoot.updatedDomains([]domainInfo{})
+		result, err = cr.getUpdatedMasters()
 	case "setnotified":
 		result, err = cr.setNotified()
 	case "gettsigkey":
@@ -289,10 +289,11 @@ EVENTS:
 			RootLog.Errorf("etcd", "events")(nil, "failed to parse entry key %q, ignoring event: %s", entryKey, err)()
 			continue
 		}
-		if entryType == tsigEntry {
-			// TSIG keys are read on demand, never stored in the data tree, and must
-			// not influence any zone serial → ignore before any zone resolution/reload.
-			debug3(nil, "ignoring events for tsig entries")(entryKey)
+		if entryType == tsigEntry || entryType == notifiedEntry {
+			// TSIG keys and notified-serial markers are global, read on demand, never stored
+			// in the data tree, and must not influence any zone serial → ignore before any
+			// zone resolution/reload.
+			debug3(nil, "ignoring events for %s entries", entryType)(entryKey)
 			continue
 		}
 		if entryType == lockEntry && event.Type != clientv3.EventTypeDelete {

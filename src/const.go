@@ -55,6 +55,7 @@ const (
 	metadataKey      = "-metadata-"
 	lockKey          = "-lock-"
 	tsigKey          = "-tsig-"
+	notifiedKey      = "-notified-"
 	keySeparator     = "/"
 	labelPrefix      = "+"
 	idSeparator      = "#"

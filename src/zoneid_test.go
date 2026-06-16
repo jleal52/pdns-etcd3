@@ -2,35 +2,48 @@
 
 package src
 
-import (
-	"testing"
-)
+import "testing"
 
-func TestZoneRegistry(t *testing.T) {
-	r := newZoneRegistry()
-	idA := r.id("a.example.")
-	idB := r.id("b.example.")
-	// stable: same name → same id
-	if r.id("a.example.") != idA {
-		Errorf(t, "id not stable for a.example.")
+func TestDomainID(t *testing.T) {
+	// deterministic: same name → same id. This is what makes setNotified work in pipe mode,
+	// where getUpdatedMasters and setNotified may run in different processes.
+	first := domainID("example.net.")
+	if again := domainID("example.net."); again != first {
+		Errorf(t, "domainID is not deterministic: %d vs %d", first, again)
 	}
 	// distinct names → distinct ids
-	if idA == idB {
-		Errorf(t, "ids collided: %d", idA)
+	if domainID("example.net.") == domainID("example.org.") {
+		Errorf(t, "domainID collided for distinct zones")
 	}
-	// reverse lookup
-	if name, ok := r.name(idB); !ok || name != "b.example." {
-		Errorf(t, "reverse lookup failed: %q ok=%v", name, ok)
+	// always a non-negative int (PowerDNS domain_id)
+	if domainID("example.net.") < 0 {
+		Errorf(t, "domainID must be non-negative, got %d", domainID("example.net."))
 	}
-	if _, ok := r.name(999999); ok {
-		Errorf(t, "unknown id resolved")
+}
+
+func TestFilterUpdated(t *testing.T) {
+	domains := []domainInfo{
+		{ID: 1, Zone: "a.", Serial: 10, Kind: kindMaster}, // notified==serial → NOT updated
+		{ID: 2, Zone: "b.", Serial: 20, Kind: kindMaster}, // notified!=serial → updated
+		{ID: 3, Zone: "c.", Serial: 30, Kind: kindMaster}, // no notified entry (0) → updated
 	}
-	// notified serial round-trips by name; default 0
-	if r.notifiedSerial("a.example.") != 0 {
-		Errorf(t, "default notified serial not 0")
+	notified := map[int64]uint32{1: 10, 2: 15}
+
+	got := filterUpdated(domains, notified)
+	if len(got) != 2 {
+		Fatalf(t, "want 2 updated, got %d: %v", len(got), got)
 	}
-	r.setNotified("a.example.", 12345)
-	if got := r.notifiedSerial("a.example."); got != 12345 {
-		Errorf(t, "notified serial = %d, want 12345", got)
+	ids := map[int64]bool{}
+	for _, d := range got {
+		ids[d.ID] = true
+		if d.ID == 2 && d.NotifiedSerial != 15 {
+			Errorf(t, "zone 2 NotifiedSerial = %d, want 15", d.NotifiedSerial)
+		}
+	}
+	if ids[1] {
+		Errorf(t, "zone 1 (serial==notified) must not be reported as updated")
+	}
+	if !ids[2] || !ids[3] {
+		Errorf(t, "zones 2 and 3 must be reported as updated")
 	}
 }

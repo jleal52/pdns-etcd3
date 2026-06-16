@@ -298,40 +298,15 @@ func (dn *dataNode) allDomains(result []domainInfo) []domainInfo {
 		serial := int64(soaWireSerial(dn))
 		dn.Logf(3)("allDomains: found zone %q", zone)("serial", serial)
 		result = append(result, domainInfo{
-			ID:             zoneIDs.id(zone),
-			Zone:           zone,
-			Serial:         serial,
-			NotifiedSerial: int64(zoneIDs.notifiedSerial(zone)),
-			Kind:           kindMaster,
+			ID:     domainID(zone),
+			Zone:   zone,
+			Serial: serial,
+			Kind:   kindMaster,
+			// NotifiedSerial is filled in by the request handler from the persisted etcd state.
 		})
 	}
 	for _, child := range dn.children {
 		result = child.allDomains(result)
-	}
-	return result
-}
-
-// updatedDomains returns the zones whose current serial differs from the last serial
-// PowerDNS notified secondaries about (so PowerDNS will send NOTIFY for them).
-func (dn *dataNode) updatedDomains(result []domainInfo) []domainInfo {
-	// See allDomains for the locking rationale (parent-before-child RLock).
-	dn.RLock(false)
-	defer dn.RUnlock(false)
-	if dn.hasSOA() {
-		zone := dn.getQname()
-		serial := soaWireSerial(dn)
-		if serial != zoneIDs.notifiedSerial(zone) {
-			result = append(result, domainInfo{
-				ID:             zoneIDs.id(zone),
-				Zone:           zone,
-				Serial:         int64(serial),
-				NotifiedSerial: int64(zoneIDs.notifiedSerial(zone)),
-				Kind:           kindMaster,
-			})
-		}
-	}
-	for _, child := range dn.children {
-		result = child.updatedDomains(result)
 	}
 	return result
 }
@@ -420,6 +395,10 @@ func parseEntryKey(key string) (name Name, entryType entryType, qtype, id string
 		return
 	case tsigEntry:
 		// the remainder after "-tsig-/" is the key name (may contain dots)
+		id = key
+		return
+	case notifiedEntry:
+		// the remainder after "-notified-/" is the domain id
 		id = key
 		return
 	default:
@@ -511,10 +490,11 @@ ITEMS:
 			debug3("ignoring lock entry")(item.Key)
 			continue ITEMS
 		}
-		if entryType == tsigEntry {
-			// TSIG keys are read on demand, never stored in the data tree, and must
-			// not influence any zone serial → skip before the maxRev update below.
-			debug3("ignoring tsig entry")(item.Key)
+		if entryType == tsigEntry || entryType == notifiedEntry {
+			// TSIG keys and notified-serial markers are global, read on demand, never stored
+			// in the data tree, and must not influence any zone serial → skip before the
+			// maxRev update below.
+			debug3("ignoring %s entry", entryType)(item.Key)
 			continue ITEMS
 		}
 		// check if the entry belongs to this domain

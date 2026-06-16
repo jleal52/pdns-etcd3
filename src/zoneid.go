@@ -14,63 +14,91 @@ limitations under the License. */
 
 package src
 
-import "sync"
+import (
+	"hash/fnv"
+	"strconv"
+	"strings"
+)
 
-// zoneRegistry assigns stable integer ids to zones (the PowerDNS domain_id used by
-// list/getDomainInfo/getAllDomains/getUpdatedMasters/setNotified) and remembers the
-// last serial PowerDNS notified secondaries about.
-//
-// Both maps are process-local: ids need only be stable within one process run, and the
-// notified serial is deliberately NOT persisted to etcd (persisting it under the zone
-// prefix would bump the zone revision and thus the serial, causing an endless NOTIFY
-// loop). Consequence: after a pe3 restart every zone looks "updated" once, producing a
-// single harmless re-NOTIFY round. Primary operation therefore expects standalone mode.
-type zoneRegistry struct {
-	mutex    sync.Mutex
-	byName   map[string]int64
-	byID     map[int64]string
-	notified map[string]uint32
-	nextID   int64
+// domainID derives the PowerDNS domain_id for a zone deterministically from its canonical
+// (lowercased, trailing-dot) name. It MUST be stable across processes: in pipe mode PowerDNS
+// spawns a separate pe3 process per request thread, so getUpdatedMasters and setNotified can
+// run in different processes and must agree on the id↔zone association. A 31-bit FNV-1a hash
+// is used — collisions are astronomically unlikely for realistic zone counts, and a collision
+// would at worst cause one spurious (harmless) NOTIFY.
+func domainID(qname string) int64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(qname))
+	return int64(h.Sum32() & 0x7fffffff)
 }
 
-func newZoneRegistry() *zoneRegistry {
-	return &zoneRegistry{
-		byName:   map[string]int64{},
-		byID:     map[int64]string{},
-		notified: map[string]uint32{},
+// The notified serial (the last serial PowerDNS told the secondaries about) is persisted in
+// etcd under a GLOBAL pseudo-entry, keyed by domain id: <prefix>-notified-/<id>. Living outside
+// any zone's prefix, it (a) never enters a zone's zoneRev()/serial — so writing it cannot create
+// a NOTIFY feedback loop — and (b) is shared by every pe3 process, so automatic NOTIFY works in
+// pipe mode too (not only standalone). It is read/written on demand and is skipped by reload and
+// handleEvents (like the -tsig- keys). Keying by id (not name) means setNotified — which only
+// receives the id — needs no reverse lookup.
+
+func notifiedSerialKey(id int64) string {
+	return *args.Prefix + notifiedKey + keySeparator + strconv.FormatInt(id, 10)
+}
+
+// getNotifiedSerial reads the notified serial for one domain id (0 if unset or on error).
+func getNotifiedSerial(id int64) uint32 {
+	resp, err := cli.Get(notifiedSerialKey(id), false, nil, *args.DialTimeout)
+	if err != nil {
+		RootLog.Errorf("etcd")(nil, "getNotifiedSerial: etcd get failed: %s", err)("id", id)
+		return 0
 	}
-}
-
-// zoneIDs is the global registry.
-var zoneIDs = newZoneRegistry()
-
-func (r *zoneRegistry) id(qname string) int64 {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	if id, ok := r.byName[qname]; ok {
-		return id
+	for item := range resp.DataChan {
+		return parseNotifiedSerial(item.Value)
 	}
-	r.nextID++
-	r.byName[qname] = r.nextID
-	r.byID[r.nextID] = qname
-	return r.nextID
+	return 0
 }
 
-func (r *zoneRegistry) name(id int64) (string, bool) {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	qname, ok := r.byID[id]
-	return qname, ok
+// getAllNotifiedSerials reads every persisted notified serial, keyed by domain id (empty on error).
+func getAllNotifiedSerials() map[int64]uint32 {
+	out := map[int64]uint32{}
+	prefix := *args.Prefix + notifiedKey + keySeparator
+	resp, err := cli.Get(prefix, true, nil, *args.DialTimeout)
+	if err != nil {
+		RootLog.Errorf("etcd")(nil, "getAllNotifiedSerials: etcd get failed: %s", err)()
+		return out
+	}
+	for item := range resp.DataChan {
+		if id, err := strconv.ParseInt(strings.TrimPrefix(item.Key, prefix), 10, 64); err == nil {
+			out[id] = parseNotifiedSerial(item.Value)
+		}
+	}
+	return out
 }
 
-func (r *zoneRegistry) notifiedSerial(qname string) uint32 {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	return r.notified[qname]
+// putNotifiedSerial persists the notified serial for a domain id.
+func putNotifiedSerial(id int64, serial uint32) error {
+	_, err := cli.Put(notifiedSerialKey(id), strconv.FormatUint(uint64(serial), 10), *args.DialTimeout)
+	return err
 }
 
-func (r *zoneRegistry) setNotified(qname string, serial uint32) {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	r.notified[qname] = serial
+func parseNotifiedSerial(v []byte) uint32 {
+	n, err := strconv.ParseUint(strings.TrimSpace(string(v)), 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
+}
+
+// filterUpdated returns the zones whose current serial differs from the serial PowerDNS last
+// notified secondaries about (so PowerDNS will send NOTIFY for them), filling in NotifiedSerial.
+func filterUpdated(domains []domainInfo, notified map[int64]uint32) []domainInfo {
+	//goland:noinspection GoPreferNilSlice
+	updated := []domainInfo{}
+	for _, d := range domains {
+		ns := notified[d.ID]
+		if uint32(d.Serial) != ns {
+			d.NotifiedSerial = int64(ns)
+			updated = append(updated, d)
+		}
+	}
+	return updated
 }

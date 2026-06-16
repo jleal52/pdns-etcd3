@@ -39,6 +39,7 @@ const (
 	metadataEntry entryType = "metadata"
 	lockEntry     entryType = "lock"
 	tsigEntry     entryType = "tsig"
+	notifiedEntry entryType = "notified"
 )
 
 var (
@@ -48,6 +49,7 @@ var (
 		metadataKey: metadataEntry,
 		lockKey:     lockEntry,
 		tsigKey:     tsigEntry,
+		notifiedKey: notifiedEntry,
 	}
 )
 

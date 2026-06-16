@@ -1690,3 +1690,34 @@ func TestPDNSAXFRSecondary(t *testing.T) {
 		}, 500*time.Millisecond, 40*time.Second))
 	Logf(t, "secondary picked up the update (www2.example.net. present)")
 }
+
+// TestPDNSNotifiedSerialPersisted verifies the notified serial lives in etcd, not process
+// memory: a value written by putNotifiedSerial is read back by fresh on-demand reads
+// (getNotifiedSerial / getAllNotifiedSerials). That process-independent persistence is what
+// makes automatic NOTIFY work in pipe mode, where getUpdatedMasters and setNotified run in
+// separate short-lived processes. (Named TestPDNS* so CI's -run PDNS job executes it.)
+func TestPDNSNotifiedSerialPersisted(t *testing.T) {
+	defer recoverPanicsT(t)
+	etcd, err := startETCD(t)
+	fatalOnErr(t, "start ETCD container", err)
+	defer etcd.Terminate()
+	sleepT(t, 1*time.Second)
+	pe3 := startPE3(t, etcd.Endpoint, "", "-pdns-version="+getenvT("PDNS_VERSION", fmt.Sprintf("%d", defaultPdnsVersion))[:1])
+	defer pe3.Terminate()
+	fatalOnErr(t, "wait for PE3 ready", waitFor(t, "PE3 ready", func() bool { return status.serving }, 10*time.Millisecond, 30*time.Second))
+
+	id := domainID("example.net.")
+	const serial = uint32(2026061699)
+	if got := getNotifiedSerial(id); got != 0 {
+		Errorf(t, "expected notified serial 0 before any write, got %d", got)
+	}
+	fatalOnErr(t, "putNotifiedSerial", putNotifiedSerial(id, serial))
+	// read back via on-demand etcd reads (no in-memory caching involved)
+	if got := getNotifiedSerial(id); got != serial {
+		Errorf(t, "getNotifiedSerial = %d, want %d", got, serial)
+	}
+	if m := getAllNotifiedSerials(); m[id] != serial {
+		Errorf(t, "getAllNotifiedSerials[%d] = %d, want %d", id, m[id], serial)
+	}
+	Logf(t, "notified serial persisted in etcd and read back on demand (id=%d serial=%d)", id, serial)
+}
