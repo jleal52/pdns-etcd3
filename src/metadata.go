@@ -47,7 +47,7 @@ func (cr *pdnsClientRequest) getDomainInfo() (any, error) {
 		zone := data.getQname()
 		return objectType[any]{
 			"id":              zoneIDs.id(zone),
-			"zone":            cr.Request.Parameters["name"],
+			"zone":            data.getQname(),
 			"serial":          int64(soaWireSerial(data)),
 			"notified_serial": int64(zoneIDs.notifiedSerial(zone)),
 			"kind":            kindMaster,

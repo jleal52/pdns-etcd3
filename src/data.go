@@ -286,6 +286,13 @@ type domainInfo struct {
 }
 
 func (dn *dataNode) allDomains(result []domainInfo) []domainInfo {
+	// RLock this node while reading its records/children: zone reloads rebuild them
+	// under a write lock. Each recursive call self-locks the child, and we keep this
+	// node RLocked until the child loop finishes, so the walked path is locked
+	// top-down (parent-before-child, matching getChild's order) — no deadlock vs the
+	// reload WLock and no concurrent-map access.
+	dn.RLock(false)
+	defer dn.RUnlock(false)
 	if dn.hasSOA() {
 		zone := dn.getQname()
 		serial := int64(soaWireSerial(dn))
@@ -307,6 +314,9 @@ func (dn *dataNode) allDomains(result []domainInfo) []domainInfo {
 // updatedDomains returns the zones whose current serial differs from the last serial
 // PowerDNS notified secondaries about (so PowerDNS will send NOTIFY for them).
 func (dn *dataNode) updatedDomains(result []domainInfo) []domainInfo {
+	// See allDomains for the locking rationale (parent-before-child RLock).
+	dn.RLock(false)
+	defer dn.RUnlock(false)
 	if dn.hasSOA() {
 		zone := dn.getQname()
 		serial := soaWireSerial(dn)
