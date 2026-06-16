@@ -280,6 +280,12 @@ EVENTS:
 			RootLog.Errorf("etcd", "events")(nil, "failed to parse entry key %q, ignoring event: %s", entryKey, err)()
 			continue
 		}
+		if entryType == tsigEntry {
+			// TSIG keys are read on demand, never stored in the data tree, and must
+			// not influence any zone serial → ignore before any zone resolution/reload.
+			debug3(nil, "ignoring events for tsig entries")(entryKey)
+			continue
+		}
 		if entryType == lockEntry && event.Type != clientv3.EventTypeDelete {
 			debug3(nil, "ignoring non-DELETE events for lock entries")(event.Type.String(), entryKey)
 			continue
