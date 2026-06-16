@@ -66,6 +66,9 @@ const (
 	MetaFixedSerial   = "X-PE3-FIXED-SERIAL"
 )
 
+// kindMaster is the PowerDNS domain kind reported for every zone (we are always primary).
+const kindMaster = "MASTER"
+
 type ipMetaT map[int]struct {
 	totalOctets int
 	partOctets  int

@@ -247,3 +247,19 @@ func TestAllDomainsReportsKindAndID(t *testing.T) {
 		Errorf(t, "serial = %d, want 7", got[0].Serial)
 	}
 }
+
+func TestUpdatedDomains(t *testing.T) {
+	zoneIDs = newZoneRegistry()
+	apex := newDataNode(nil, "example", "", false)
+	apex.records["SOA"] = map[string]recordType{"": {content: "ns1 host 1 2 3 4 5"}}
+	apex.maxRev = 10
+	// not notified yet → appears as updated
+	if got := apex.updatedDomains(nil); len(got) != 1 || got[0].Serial != 10 {
+		Fatalf(t, "want 1 updated domain serial 10, got %v", got)
+	}
+	// after notifying the current serial → no longer updated
+	zoneIDs.setNotified("example.", 10)
+	if got := apex.updatedDomains(nil); len(got) != 0 {
+		Errorf(t, "want 0 updated after notify, got %v", got)
+	}
+}

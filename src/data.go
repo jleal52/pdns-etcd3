@@ -295,11 +295,33 @@ func (dn *dataNode) allDomains(result []domainInfo) []domainInfo {
 			Zone:           zone,
 			Serial:         serial,
 			NotifiedSerial: int64(zoneIDs.notifiedSerial(zone)),
-			Kind:           "MASTER",
+			Kind:           kindMaster,
 		})
 	}
 	for _, child := range dn.children {
 		result = child.allDomains(result)
+	}
+	return result
+}
+
+// updatedDomains returns the zones whose current serial differs from the last serial
+// PowerDNS notified secondaries about (so PowerDNS will send NOTIFY for them).
+func (dn *dataNode) updatedDomains(result []domainInfo) []domainInfo {
+	if dn.hasSOA() {
+		zone := dn.getQname()
+		serial := soaWireSerial(dn)
+		if serial != zoneIDs.notifiedSerial(zone) {
+			result = append(result, domainInfo{
+				ID:             zoneIDs.id(zone),
+				Zone:           zone,
+				Serial:         int64(serial),
+				NotifiedSerial: int64(zoneIDs.notifiedSerial(zone)),
+				Kind:           kindMaster,
+			})
+		}
+	}
+	for _, child := range dn.children {
+		result = child.updatedDomains(result)
 	}
 	return result
 }

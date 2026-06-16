@@ -50,7 +50,7 @@ func (cr *pdnsClientRequest) getDomainInfo() (any, error) {
 			"zone":            cr.Request.Parameters["name"],
 			"serial":          int64(soaWireSerial(data)),
 			"notified_serial": int64(zoneIDs.notifiedSerial(zone)),
-			"kind":            "MASTER",
+			"kind":            kindMaster,
 		}, nil
 	})
 }
