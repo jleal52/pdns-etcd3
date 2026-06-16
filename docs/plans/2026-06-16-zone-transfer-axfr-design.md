@@ -187,10 +187,25 @@ En modo HTTP no hay `initialize`, así que la versión de PDNS para decidir nomb
 | **F4 — DNSSEC presigned sobre AXFR** | R7-B (auth flags, PRESIGNED, serial coherente) | Pequeño-Mediano |
 | **transversal** | R5 (monotonicidad serial), versionado + docs, tests integración | Mediano |
 
-## 10. Decisiones abiertas (a cerrar antes del plan)
+## 10. Decisiones de diseño (resueltas — 2026-06-16)
 
-1. **Estrategia de snapshot del AXFR** (§4): RLock de toda la zona durante la transferencia
-   vs copia bajo lock.
-2. **Garantía de monotonicidad del serial uint32** (§R5) para un primario dinámico, y cómo se
-   concilia con `X-PE3-FIXED-SERIAL` en zonas presigned.
-3. **Esquema de almacenamiento de claves TSIG** en etcd: global vs por zona, y formato.
+1. **Estrategia de snapshot del AXFR** (§4) → **RLock del subárbol durante el walk.**
+   `list` es una única petición/respuesta JSON: el backend materializa el array completo de
+   registros en memoria y responde; el transfer TCP al secundario lo hace PowerDNS *después*,
+   sin lock del backend. Por tanto el RLock solo se sostiene durante el recorrido en memoria
+   (rápido), con consistencia fuerte y contención despreciable. Trabajo: recorrido recursivo
+   que RLockea/RUnlockea cada hijo y se detiene en zonas hijas (`hasSOA()`).
+
+2. **Serial uint32 monótono** (§R5) → **proyección uint32 de `zoneRev()`.**
+   Emitir `uint32(zoneRev())` manteniendo el suelo `X-PE3-MINIMUM-SERIAL` en espacio `int64`.
+   Es monótono bajo RFC 1982 porque los incrementos entre sondeos del secundario son ≪ 2^31,
+   así el wraparound se interpreta correctamente como "más nuevo". Conserva el serial
+   automático cero-mantenimiento. Precedencia de serial: `X-PE3-FIXED-SERIAL` (presigned) >
+   suelo `X-PE3-MINIMUM-SERIAL` > proyección automática.
+
+3. **Almacén de claves TSIG** (§R6) → **global por nombre bajo pseudo-prefijo `-tsig-/<nombre>`.**
+   Las claves TSIG son objetos globales referenciados por nombre (`getTSIGKey(name)` no recibe
+   zona). Se guardan como objeto `{algorithm, secret}` (JSON5/YAML), análogo a los pseudo-
+   entries `-metadata-`/`-lock-` (`src/const.go:52`). La ACL "qué clave transfiere qué zona"
+   la sigue dando la metadata `TSIG-ALLOW-AXFR` por zona (passthrough existente). Nota de
+   seguridad: el secreto vive en etcd → proteger con ACLs/cifrado en reposo y documentarlo.
