@@ -338,7 +338,13 @@ The relevant per-zone metadata keys (stored as ordinary metadata, `<zone>/-metad
 * `ALSO-NOTIFY` — list of extra `ip[:port]` targets to send `NOTIFY` to (in addition to the zone's `NS` records).
 * `PRESIGNED` — marks a [pre-signed DNSSEC](#pre-signed-dnssec) zone (`PRESIGNED=1`); PowerDNS then serves the stored `RRSIG`/`NSEC`/`DNSKEY` records as-is.
 
-Automatic `NOTIFY` on zone changes relies on tracking the last *notified* serial per zone. pdns-etcd3 keeps this value **in memory only** (exposed to PowerDNS via the `notified_serial` field of the `getDomainInfo`/`getUpdatedMasters`/`getAllDomains` responses — there is no etcd metadata key for it) and deliberately does **not** persist it in ETCD — storing it would itself be a zone change and trigger a NOTIFY feedback loop. Because the notified-serial state lives only in the running process, automatic `NOTIFY` requires a **standalone (long-lived) run mode**: in pipe mode PowerDNS spawns a separate short-lived process per request thread, each with its own (empty) state, so there is no stable place to remember what was last notified.
+Automatic `NOTIFY` on zone changes relies on tracking the last *notified* serial per zone (PowerDNS compares it to the current serial to decide whether to notify). pdns-etcd3 persists this value in ETCD under a **global pseudo-entry keyed by domain id**:
+
+```text
+<prefix>-notified-/<id>   →   "<serial>"
+```
+
+It is written by `setNotified` and read by `getUpdatedMasters`/`getDomainInfo`/`getAllDomains`. The `<id>` is the `domain_id` PowerDNS uses — a deterministic 31-bit hash of the zone name (stable across processes). The entry lives **outside any zone's prefix**, so recording it never enters a zone's `zoneRev()`/serial (which would otherwise trigger a NOTIFY feedback loop); like the `-tsig-` keys it is read/written on demand and is **never** part of a zone reload. Because the state is in ETCD (not process memory), automatic `NOTIFY` works in **any run mode — pipe as well as standalone**.
 
 ## Pre-signed DNSSEC
 
@@ -619,8 +625,8 @@ One can use it to check their data - whether an adjustment is needed for a new p
 
 ### 0.2.1
 * added global TSIG key pseudo-entry `-tsig-/<keyname>` → `"<algorithm> <base64-secret>"` (for AXFR-OUT)
-* documented [primary / AXFR](#primary--axfr) operation: per-zone metadata `TSIG-ALLOW-AXFR`, `ALLOW-AXFR-FROM`, `ALSO-NOTIFY`, `PRESIGNED` (all via the existing metadata passthrough; no new key shapes besides `-tsig-`)
-* note: the notified serial (the `notified_serial` field of `getDomainInfo`/`getUpdatedMasters`) is tracked in memory only and is **not** stored in ETCD
+* added global notified-serial pseudo-entry `-notified-/<id>` → `"<serial>"` (drives automatic `NOTIFY` in any run mode, incl. pipe)
+* documented [primary / AXFR](#primary--axfr) operation: per-zone metadata `TSIG-ALLOW-AXFR`, `ALLOW-AXFR-FROM`, `ALSO-NOTIFY`, `PRESIGNED` (all via the existing metadata passthrough)
 
 ### 0.2.0
 * allow JSON5 syntax

@@ -39,7 +39,7 @@ the fourth development release, considered alpha quality. Any testing is appreci
 * [`ALIAS`](https://doc.powerdns.com/authoritative/guides/alias.html) support
 * [Primary (master) mode with AXFR zone transfer](#primary-mode-axfr-zone-transfer)
     * every zone is served to PowerDNS as `MASTER`, so secondaries can `AXFR` it (the `list` remote-backend method)
-    * automatic `NOTIFY` on zone changes (via `getUpdatedMasters` / `setNotified`) when run [standalone](#standalone-modes)
+    * automatic `NOTIFY` on zone changes (via `getUpdatedMasters` / `setNotified`) in any run mode (the notified serial is persisted in ETCD)
     * AXFR ACL by IP (`allow-axfr-ips` / `ALLOW-AXFR-FROM` metadata) and/or [TSIG key](doc/ETCD-structure.md#tsig-keys) (`TSIG-ALLOW-AXFR` metadata)
     * pre-signed DNSSEC zones are transferred as-is
 * [Multi-level defaults and options](doc/ETCD-structure.md#defaults-and-options), overridable
@@ -94,7 +94,7 @@ the fourth development release, considered alpha quality. Any testing is appreci
 ### Overview over the support of optional [PDNS features in a remote backend][pdns-remote]:
 * Primary (master): yes — see [Primary mode (AXFR zone transfer)](#primary-mode-axfr-zone-transfer)
   * AXFR support: yes (`list` method), with IP and/or TSIG ACL
-  * automatic NOTIFY: yes, in [standalone mode](#standalone-modes) (notified-serial state is in-memory)
+  * automatic NOTIFY: yes, in any run mode (the notified serial is persisted in ETCD)
 * (Auto)Secondary: no
 * DNSSEC: pre-signed yes, live-signing not yet (planned feature)
   * Metadata: yes
@@ -237,15 +237,12 @@ For AXFR, PowerDNS notifies the zone's `NS` records plus any [`also-notify`][pdn
 
 #### Run mode
 
-Plain AXFR serving (a secondary pulling the zone) works in **any** run mode (pipe or standalone).
-
-Automatic `NOTIFY` on zone changes, however, requires a [standalone](#standalone-modes) (long-lived) launch
-(`-standalone=...`). PowerDNS detects a changed zone by comparing the serial to the last *notified* serial,
-which pdns-etcd3 tracks **in memory only** (it is deliberately not stored in ETCD — storing it would itself be a zone
-change and cause a NOTIFY feedback loop). In pipe mode PowerDNS spawns a fresh short-lived process per request thread,
-so there is no stable place to remember what was last notified. As a side effect, after a pdns-etcd3 restart the
-notified serial starts empty again, so every zone is re-`NOTIFY`ed once (harmless — secondaries that are already
-up to date simply ignore it).
+Both plain AXFR serving (a secondary pulling the zone) and automatic `NOTIFY` on zone changes work in
+**any** run mode (pipe or standalone). PowerDNS detects a changed zone by comparing the serial to the last
+*notified* serial, which pdns-etcd3 persists in ETCD under a global `-notified-/<id>` entry (kept outside any
+zone's prefix so that recording it never bumps a zone's own serial — which would otherwise cause a NOTIFY
+feedback loop). Because that state lives in ETCD it is shared across processes, so it also works in pipe mode,
+where PowerDNS spawns a fresh short-lived process per request thread.
 
 #### Pointing an external secondary
 
