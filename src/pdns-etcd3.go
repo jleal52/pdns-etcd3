@@ -243,6 +243,8 @@ func (cr *pdnsClientRequest) handleRequest(ctx context.Context) {
 		result, err = cr.list()
 	case "getupdatedmasters", "getupdatedprimaries":
 		result = dataRoot.updatedDomains([]domainInfo{})
+	case "setnotified":
+		result, err = cr.setNotified()
 	default:
 		result, err = false, fmt.Errorf("unknown/unimplemented request: %s", val2str(cr.Request))
 	}

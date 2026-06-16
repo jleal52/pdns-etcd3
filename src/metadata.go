@@ -113,3 +113,24 @@ func (cr *pdnsClientRequest) setDomainMetadata(ctx context.Context) (bool, error
 	cr.Logf(3, "main")("setDomainMetadata finished")("kind", kind, "values", values)
 	return true, nil
 }
+
+// setNotified records the serial PowerDNS just notified secondaries about. It only
+// updates the in-memory registry (no etcd write) to avoid bumping the zone revision and
+// triggering a NOTIFY feedback loop.
+func (cr *pdnsClientRequest) setNotified() (bool, error) {
+	id, err := paramInt64(cr.Request.Parameters["id"])
+	if err != nil {
+		return false, fmt.Errorf("bad id: %s", err)
+	}
+	serial, err := paramInt64(cr.Request.Parameters["serial"])
+	if err != nil {
+		return false, fmt.Errorf("bad serial: %s", err)
+	}
+	zone, ok := zoneIDs.name(id)
+	if !ok {
+		return false, fmt.Errorf("unknown domain id %d", id)
+	}
+	zoneIDs.setNotified(zone, uint32(serial))
+	cr.Logf(2, "main")("setNotified")("zone", zone, "serial", serial)
+	return true, nil
+}
