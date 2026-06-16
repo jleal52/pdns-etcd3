@@ -249,6 +249,11 @@ func (cr *pdnsClientRequest) handleRequest(ctx context.Context) {
 		result, err = cr.getTSIGKey()
 	case "gettsigkeys":
 		result, err = cr.getTSIGKeys()
+	case "getdomainkeys":
+		// remote-dnssec=yes (required to enable getTSIGKey) makes PowerDNS enumerate DNSSEC
+		// keys per zone; pe3 manages none (zones are plain or pre-signed), so report an
+		// empty set instead of erroring.
+		result = []objectType[any]{} // must not be nil → marshals to `[]`
 	default:
 		result, err = false, fmt.Errorf("unknown/unimplemented request: %s", val2str(cr.Request))
 	}
