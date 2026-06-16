@@ -115,6 +115,27 @@ func makeResultItem(qname Name, qtype string, data *dataNode, record *recordType
 	return result
 }
 
+// walkZoneRecords appends every record of the zone rooted at dn — its own records plus
+// those of all descendant nodes that are NOT themselves zones (no SOA) — to result, as
+// PowerDNS result items. The receiver must be RLocked by the caller; each descendant is
+// RLocked/RUnlocked here (parent-before-child, matching getChild's lock order).
+func (dn *dataNode) walkZoneRecords(pdnsVersion uint, result *[]objectType[any]) {
+	qname := dn.getName()
+	for qtype, byID := range dn.records {
+		for _, record := range byID {
+			record := record
+			*result = append(*result, makeResultItem(qname, qtype, dn, &record, pdnsVersion))
+		}
+	}
+	for _, child := range dn.children {
+		child.RLock(false)
+		if !child.hasSOA() { // stop at delegated sub-zones (own SOA)
+			child.walkZoneRecords(pdnsVersion, result)
+		}
+		child.RUnlock(false)
+	}
+}
+
 type searchOrderElement struct {
 	qtype, id string
 }
