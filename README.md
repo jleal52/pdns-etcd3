@@ -211,6 +211,7 @@ On the backend side this is implemented by the remote-backend methods `getDomain
 `getUpdatedMasters` / `getUpdatedPrimaries` + `setNotified` (drive automatic NOTIFY),
 and `getTSIGKey` / `getTSIGKeys` (TSIG verification/signing). There is nothing to enable in the backend itself —
 just configure PowerDNS and (optionally) the per-zone [metadata](doc/ETCD-structure.md#primary--axfr) below.
+Note: TSIG-secured transfers additionally require `remote-dnssec=yes` in PowerDNS (see [TSIG](#tsig)).
 
 The authoritative on-ETCD layout for everything mentioned here is in the ETCD structure document:
 [Primary / AXFR](doc/ETCD-structure.md#primary--axfr) and [TSIG keys](doc/ETCD-structure.md#tsig-keys).
@@ -253,6 +254,11 @@ pdns-etcd3 directly). Make sure the transfer is permitted: either by IP (`allow-
 TSIG (see below), or both. Verify with `dig` (see [Verifying](#verifying) below) before relying on the secondary.
 
 #### TSIG
+
+**Required PowerDNS setting:** enable `remote-dnssec=yes`. PowerDNS's remote backend gates the DNSSEC/TSIG
+methods (including `getTSIGKey`) behind the backend's `dnssec` flag — without `remote-dnssec=yes` PowerDNS never
+queries the backend for the TSIG key and denies the signed transfer with `NOTAUTH`. (pe3 manages no DNSSEC keys, so
+it answers `getDomainKeys` with an empty set; pre-signed zones still work via the `PRESIGNED` metadata.)
 
 TSIG keys are stored as a *global* pseudo-entry in ETCD (not under any zone), read on demand by `getTSIGKey` /
 `getTSIGKeys`:

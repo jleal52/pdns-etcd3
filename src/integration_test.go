@@ -1157,16 +1157,6 @@ func TestPDNSAXFRPresigned(t *testing.T) {
 // one form is consulted, the other seed is simply unused.
 func TestPDNSAXFRTSIG(t *testing.T) {
 	defer recoverPanicsT(t)
-	// WIP — skipped: end-to-end TSIG verification does not yet work with this PowerDNS
-	// remote-backend setup. With the metadata fix, getDomainMetadata(TSIG-ALLOW-AXFR)
-	// correctly returns the allowed key name, but PowerDNS (5.0) then reports
-	// "TSIG key '<name>' for domain '<zone>' not found" WITHOUT ever calling getTSIGKey/
-	// getTSIGKeys on the backend (0 such requests in the pe3 log) — so a signed AXFR is
-	// denied (rcode 9 NOTAUTH). The unsigned-refusal half already works. Resolving this
-	// needs investigation of how PowerDNS retrieves TSIG keys from the remote backend
-	// (does it ever call getTSIGKey for the http connector? is a setting/capability
-	// required?). The pe3-side getTSIGKey/getTSIGKeys handlers are unit-covered.
-	t.Skip("WIP: PowerDNS does not call getTSIGKey on the remote backend; signed AXFR denied (NOTAUTH). See comment.")
 	// TSIG material: a fixed, valid HMAC-SHA256 secret (base64 of exactly 32 bytes).
 	const (
 		tsigKeyName = "axfrkey."                                     // canonical FQDN, used identically in all 3 places
@@ -1211,11 +1201,12 @@ func TestPDNSAXFRTSIG(t *testing.T) {
 	// PDNS primary mode, AXFR gated by TSIG ONLY (deliberately NO allow-axfr-ips, so an
 	// unsigned transfer must be refused; a TSIG-signed one is allowed via TSIG-ALLOW-AXFR).
 	// Version-appropriate master/primary (PDNS 5.0 FATALs on the removed "master" alias).
-	// Metadata is reachable via getdomainmetadata and metadata caching is already disabled
-	// in startPDNS, so PDNS consults TSIG-ALLOW-AXFR + getTSIGKey automatically — no extra
-	// "enable TSIG" setting needed.
+	// remote-dnssec=yes is REQUIRED for TSIG: PowerDNS's remote backend gates getTSIGKey
+	// behind the backend "dnssec" flag (remotebackend.cc: `if (!d_dnssec) return false;`),
+	// so without it PowerDNS never calls getTSIGKey and denies the signed AXFR (NOTAUTH).
 	pdns, err := startPDNS(t, map[string]string{
 		primaryModeSetting(getenvT("PDNS_VERSION", "50")): "34",
+		"remote-dnssec=yes": "34",
 	})
 	fatalOnErr(t, "start PDNS container", err)
 	defer pdns.Terminate()

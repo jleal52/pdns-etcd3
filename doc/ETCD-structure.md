@@ -323,6 +323,8 @@ there is no need to create or delete them manually. They are not part of the aut
 
 These entries are read on demand by the `getTSIGKey` / `getTSIGKeys` remote-backend methods (which PowerDNS calls when it needs to verify or sign a TSIG-protected message, e.g. for [AXFR](#primary--axfr)). They are **never cached in the data tree** (so they are not part of any zone reload) and **never affect any zone serial**. Malformed values (not of the `<algorithm> <base64-secret>` form) are logged and skipped.
 
+**PowerDNS must be configured with `remote-dnssec=yes`** for any of this to take effect: the remote backend gates `getTSIGKey`/`getTSIGKeys` (and the other DNSSEC methods) behind its `dnssec` flag, and otherwise never queries the backend for the key (the signed transfer is refused with `NOTAUTH`). pe3 manages no DNSSEC keys, so it answers `getDomainKeys` with an empty set.
+
 The `<keyname>` is whatever PowerDNS sends; it may or may not carry a trailing `.` (FQDN). To be safe, store the key under both spellings (`<name>` and `<name>.`) so the lookup matches regardless of canonicalization.
 
 ## Primary / AXFR
