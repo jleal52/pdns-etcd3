@@ -140,18 +140,34 @@ func makeResultItem(qname Name, qtype string, data *dataNode, record *recordType
 // those of all descendant nodes that are NOT themselves zones (no SOA) — to result, as
 // PowerDNS result items. The receiver must be RLocked by the caller; each descendant is
 // RLocked/RUnlocked here (parent-before-child, matching getChild's lock order).
+// Records at and below a delegation point are marked non-authoritative — see
+// walkZoneRecordsAuth.
 func (dn *dataNode) walkZoneRecords(pdnsVersion uint, result *[]objectType[any]) {
+	dn.walkZoneRecordsAuth(pdnsVersion, false, result)
+}
+
+// walkZoneRecordsAuth is walkZoneRecords with delegation tracking: records at and below
+// a delegation point (a non-apex node with NS but no SOA) are non-authoritative (auth=false)
+// — i.e. the delegation's NS and any glue A/AAAA, and everything beneath it.
+func (dn *dataNode) walkZoneRecordsAuth(pdnsVersion uint, belowDelegation bool, result *[]objectType[any]) {
+	_, isDelegation := dn.records["NS"][""]
+	isDelegation = isDelegation && !dn.hasSOA() // apex has NS+SOA and stays authoritative
 	qname := dn.getName()
 	for qtype, byID := range dn.records {
 		for _, record := range byID {
 			record := record
-			*result = append(*result, makeResultItem(qname, qtype, dn, &record, pdnsVersion))
+			item := makeResultItem(qname, qtype, dn, &record, pdnsVersion)
+			if belowDelegation || (isDelegation && (qtype == "NS" || qtype == "A" || qtype == "AAAA")) {
+				item["auth"] = false
+			}
+			*result = append(*result, item)
 		}
 	}
+	childBelow := belowDelegation || isDelegation
 	for _, child := range dn.children {
 		child.RLock(false)
 		if !child.hasSOA() { // stop at delegated sub-zones (own SOA)
-			child.walkZoneRecords(pdnsVersion, result)
+			child.walkZoneRecordsAuth(pdnsVersion, childBelow, result)
 		}
 		child.RUnlock(false)
 	}

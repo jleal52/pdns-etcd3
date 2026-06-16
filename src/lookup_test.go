@@ -90,3 +90,34 @@ func TestWalkZoneRecords(t *testing.T) {
 		Errorf(t, "qtype counts wrong: %v", counts)
 	}
 }
+
+func TestWalkZoneAuthFlags(t *testing.T) {
+	root := newDataNode(nil, "", "", false)
+	apex := newDataNode(root, "example", "", false)
+	root.children["example"] = apex
+	apex.records["SOA"] = map[string]recordType{"": {content: "ns1 host 1 2 3 4 5"}}
+	apex.records["NS"] = map[string]recordType{"": {content: "ns1.example."}} // apex NS → auth
+	deleg := newDataNode(apex, "sub", ".", false)
+	deleg.records["NS"] = map[string]recordType{"": {content: "ns1.sub.example."}} // delegation NS → non-auth
+	deleg.records["A"] = map[string]recordType{"": {content: "192.0.2.50"}}        // glue → non-auth
+	apex.children["sub"] = deleg
+
+	var result []objectType[any]
+	apex.RLock(false)
+	apex.walkZoneRecords(4, &result)
+	apex.RUnlock(false)
+
+	authByContent := map[string]bool{}
+	for _, it := range result {
+		authByContent[it["content"].(string)] = it["auth"].(bool)
+	}
+	if authByContent["ns1.example."] != true {
+		Errorf(t, "apex NS must be auth")
+	}
+	if authByContent["ns1.sub.example."] != false {
+		Errorf(t, "delegation NS must be non-auth")
+	}
+	if authByContent["192.0.2.50"] != false {
+		Errorf(t, "glue A must be non-auth")
+	}
+}
