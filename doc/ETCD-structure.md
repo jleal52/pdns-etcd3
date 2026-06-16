@@ -336,7 +336,7 @@ The relevant per-zone metadata keys (stored as ordinary metadata, `<zone>/-metad
 * `ALSO-NOTIFY` — list of extra `ip[:port]` targets to send `NOTIFY` to (in addition to the zone's `NS` records).
 * `PRESIGNED` — marks a [pre-signed DNSSEC](#pre-signed-dnssec) zone (`PRESIGNED=1`); PowerDNS then serves the stored `RRSIG`/`NSEC`/`DNSKEY` records as-is.
 
-Automatic `NOTIFY` on zone changes relies on tracking the last *notified* serial per zone. pdns-etcd3 keeps this value **in memory only** (exposed to PowerDNS via the reserved `X-PE3-NOTIFIED-SERIAL` metadata key) and deliberately does **not** persist it in ETCD — storing it would itself be a zone change and trigger a NOTIFY feedback loop. Because the notified-serial state lives only in the running process, automatic `NOTIFY` requires a **standalone (long-lived) run mode**: in pipe mode PowerDNS spawns a separate short-lived process per request thread, each with its own (empty) state, so there is no stable place to remember what was last notified.
+Automatic `NOTIFY` on zone changes relies on tracking the last *notified* serial per zone. pdns-etcd3 keeps this value **in memory only** (exposed to PowerDNS via the `notified_serial` field of the `getDomainInfo`/`getUpdatedMasters`/`getAllDomains` responses — there is no etcd metadata key for it) and deliberately does **not** persist it in ETCD — storing it would itself be a zone change and trigger a NOTIFY feedback loop. Because the notified-serial state lives only in the running process, automatic `NOTIFY` requires a **standalone (long-lived) run mode**: in pipe mode PowerDNS spawns a separate short-lived process per request thread, each with its own (empty) state, so there is no stable place to remember what was last notified.
 
 ## Pre-signed DNSSEC
 
@@ -618,7 +618,7 @@ One can use it to check their data - whether an adjustment is needed for a new p
 ### 0.2.1
 * added global TSIG key pseudo-entry `-tsig-/<keyname>` → `"<algorithm> <base64-secret>"` (for AXFR-OUT)
 * documented [primary / AXFR](#primary--axfr) operation: per-zone metadata `TSIG-ALLOW-AXFR`, `ALLOW-AXFR-FROM`, `ALSO-NOTIFY`, `PRESIGNED` (all via the existing metadata passthrough; no new key shapes besides `-tsig-`)
-* note: the notified serial (`X-PE3-NOTIFIED-SERIAL`) is tracked in memory only and is **not** stored in ETCD
+* note: the notified serial (the `notified_serial` field of `getDomainInfo`/`getUpdatedMasters`) is tracked in memory only and is **not** stored in ETCD
 
 ### 0.2.0
 * allow JSON5 syntax
