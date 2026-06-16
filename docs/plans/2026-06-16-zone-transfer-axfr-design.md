@@ -82,9 +82,13 @@ NOTIFY.
 
 - `getUpdatedMasters`: recorrer zonas, comparar `soaSerial(zona)` con el `notified_serial`
   almacenado, devolver **solo las que difieren** con `{id,zone,serial,notified_serial,kind}`.
-- `setNotified(id,serial)`: resolver id→zona (R2) y **persistir** el serial notificado como
-  metadata en etcd (p. ej. nueva clave `X-PE3-NOTIFIED-SERIAL`), **reutilizando**
-  `newTransaction`/`txn.Put`/`Commit` de `src/transaction.go:24`.
+- `setNotified(id,serial)`: resolver id→zona (R2) y guardar el serial notificado
+  **en memoria** (en el registro de zonas), **no** en etcd. Refinamiento descubierto al
+  planificar: persistir `notified_serial` bajo el prefijo de la zona subiría `maxRev` →
+  subiría el serial → la zona volvería a aparecer "cambiada" → **bucle de NOTIFY infinito**.
+  El estado in-memory es correcto (solo refleja "lo ya notificado"); perderlo al reiniciar
+  solo provoca un re-NOTIFY inocuo. Consecuencia: **la operación primaria/NOTIFY requiere
+  modo standalone** (proceso longevo). Ver el plan de implementación, fase F2.
 - Destinatarios del NOTIFY: PDNS notifica a los **NS de la zona** (resueltos) + `ALSO-NOTIFY`
   (metadata, ya funciona por passthrough). Requiere `primary=yes` en la config de PDNS.
 
