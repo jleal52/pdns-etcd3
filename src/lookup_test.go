@@ -31,6 +31,46 @@ func buildTestZone() *dataNode {
 	return apex
 }
 
+func TestListNotOurZone(t *testing.T) {
+	// dataRoot has no zones; list of anything returns false (refused), not an empty slice.
+	savedRoot := dataRoot
+	defer func() { dataRoot = savedRoot }()
+	dataRoot = newDataNode(nil, "", "", false)
+	cr := &pdnsClientRequest{Client: testClient(t), Request: &pdnsRequest{
+		Method: "list", Parameters: objectType[any]{"zonename": "absent.example.", "domain_id": float64(-1)},
+	}}
+	res, err := cr.list()
+	if err != nil {
+		Errorf(t, "unexpected error: %s", err)
+	}
+	if res != false {
+		Errorf(t, "want false for unknown zone, got %#v", res)
+	}
+}
+
+func TestListServedZone(t *testing.T) {
+	// dataRoot holds the example. zone; list returns its full record set (not false).
+	savedRoot := dataRoot
+	defer func() { dataRoot = savedRoot }()
+	apex := buildTestZone()
+	dataRoot = apex.parent // the empty-lname root buildTestZone rooted the tree at
+	cr := &pdnsClientRequest{Client: testClient(t), Request: &pdnsRequest{
+		Method: "list", Parameters: objectType[any]{"zonename": "example.", "domain_id": float64(0)},
+	}}
+	res, err := cr.list()
+	if err != nil {
+		Errorf(t, "unexpected error: %s", err)
+	}
+	items, ok := res.([]objectType[any])
+	if !ok {
+		Fatalf(t, "want []objectType[any] for served zone, got %#v", res)
+	}
+	// apex SOA + apex A + www A = 3; the child sub-zone's records are excluded.
+	if len(items) != 3 {
+		Errorf(t, "got %d items, want 3: %v", len(items), items)
+	}
+}
+
 func TestWalkZoneRecords(t *testing.T) {
 	apex := buildTestZone()
 	var result []objectType[any]

@@ -239,6 +239,8 @@ func (cr *pdnsClientRequest) handleRequest(ctx context.Context) {
 		result = dataRoot.allDomains([]domainInfo{}) // must not be nil, for empty answers it would not be marshaled into `[]`
 	case "getdomaininfo":
 		result, err = cr.getDomainInfo()
+	case "list":
+		result, err = cr.list()
 	default:
 		result, err = false, fmt.Errorf("unknown/unimplemented request: %s", val2str(cr.Request))
 	}

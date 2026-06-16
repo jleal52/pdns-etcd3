@@ -92,6 +92,25 @@ func (cr *pdnsClientRequest) lookup() (interface{}, error) {
 	return result, nil
 }
 
+func (cr *pdnsClientRequest) list() (any, error) {
+	zonename := ParseDomainName(strings.ToLower(cr.Request.Parameters["zonename"].(string)))
+	//goland:noinspection GoPreferNilSlice
+	result := []objectType[any]{}
+	lockDebug := cr.Client.Logf(4, "data", "locking")
+	lockDebug("list: RLocking up to %q", Supplier1(zonename.asKey, true))()
+	data, found := dataRoot.getChild(zonename, true)
+	lockDebug("list: RLocked %q", data.prefixKey)(data.LockCounts)
+	defer data.rUnlockUpwards(nil, true)
+	defer lockDebug("list: RUnlocking %q", data.prefixKey)(data.LockCounts)
+	if !found || !data.hasSOA() {
+		cr.Client.Logf(1, "data")("list: not a served zone")(zonename.normal)
+		return false, nil // refuse AXFR for zones we don't hold
+	}
+	data.walkZoneRecords(cr.Client.PdnsVersion, &result)
+	cr.Client.Logf(1, "pdns")("list: result")("zone", zonename.normal, "#", len(result))
+	return result, nil
+}
+
 func makeResultItem(qname Name, qtype string, data *dataNode, record *recordType, pdnsVersion uint) objectType[any] {
 	zoneNode := data.findZone()
 	result := objectType[any]{
