@@ -37,6 +37,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/miekg/dns"
 	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -321,8 +322,17 @@ type pdnsInfo struct {
 	Version string
 }
 
-func startPDNS(t *testing.T, dynamicSettings map[string]string) (pdnsInfo, error) {
+func startPDNS(t *testing.T, dynamicSettings map[string]string, netAliases ...map[string][]string) (pdnsInfo, error) {
 	t.Helper()
+	// optional: attach to a docker network (network name → aliases) so other containers can reach it
+	var nets []string
+	var aliases map[string][]string
+	if len(netAliases) > 0 && netAliases[0] != nil {
+		aliases = netAliases[0]
+		for n := range aliases {
+			nets = append(nets, n)
+		}
+	}
 	var image string
 	var fromDockerfile testcontainers.FromDockerfile
 	repo := "localhost/pdns-etcd3/pdns"
@@ -371,6 +381,8 @@ func startPDNS(t *testing.T, dynamicSettings map[string]string) (pdnsInfo, error
 	ctInfo, err := startContainer(t, testcontainers.ContainerRequest{
 		Image:          image,
 		FromDockerfile: fromDockerfile,
+		Networks:       nets,
+		NetworkAliases: aliases,
 		HostConfigModifier: func(hc *container.HostConfig) {
 			hc.ExtraHosts = []string{"host.docker.internal:host-gateway"}
 		},
@@ -1538,4 +1550,143 @@ func TestMetadata(t *testing.T) {
 		}
 		return dataRoot.children[tld].children[domain].metadata[key], nil
 	}, struct{}{}, ve[any]{v: SliceContains{Ordered: false, All: true, Only: true, Elements: []any{"x", "y"}}}, true)
+}
+
+// containerIPOnNetwork returns the container's IP address on the named docker network.
+func containerIPOnNetwork(t *testing.T, ct testcontainers.Container, netName string) string {
+	t.Helper()
+	ins, err := ct.Inspect(context.Background())
+	fatalOnErr(t, "inspect container", err)
+	ep, ok := ins.NetworkSettings.Networks[netName]
+	if !ok || ep == nil {
+		Fatalf(t, "container has no endpoint on network %q", netName)
+	}
+	return ep.IPAddress
+}
+
+// startBindSecondary starts an ISC BIND9 container configured as a secondary (slave) for
+// `zone`, transferring from `primaryIP` over the shared docker network `netName`. The image's
+// default CMD logs to a file, so override it with `-g` (foreground + log to stderr) so
+// testcontainers can wait on / surface the logs.
+func startBindSecondary(t *testing.T, netName, primaryIP, zone string) (*ctInfo, error) {
+	t.Helper()
+	zoneName := strings.TrimSuffix(zone, ".")
+	namedConf := fmt.Sprintf(`options {
+    directory "/var/cache/bind";
+    recursion no;
+    dnssec-validation no;
+    listen-on { any; };
+    listen-on-v6 { none; };
+    allow-query { any; };
+};
+zone "%s" {
+    type secondary;
+    primaries { %s; };
+    file "%s.db";
+    allow-notify { %s; };
+};
+`, zoneName, primaryIP, zoneName, primaryIP)
+	return startContainer(t, testcontainers.ContainerRequest{
+		Image:          "internetsystemsconsortium/bind9:9.20",
+		Cmd:            []string{"-g", "-c", "/etc/bind/named.conf"}, // -g: foreground + log to stderr
+		Networks:       []string{netName},
+		NetworkAliases: map[string][]string{netName: {"secondary"}},
+		ExposedPorts:   []string{"53/tcp"},
+		LogConsumerCfg: &testcontainers.LogConsumerConfig{Consumers: []testcontainers.LogConsumer{CtLogger{t, "BIND"}}},
+		Files: []testcontainers.ContainerFile{
+			{Reader: strings.NewReader(namedConf), ContainerFilePath: "/etc/bind/named.conf", FileMode: 0o644},
+		},
+		WaitingFor: wait.ForLog("running").WithStartupTimeout(60 * time.Second),
+	}, "53/tcp")
+}
+
+// TestPDNSAXFRSecondary spins up a REAL secondary DNS server (ISC BIND9) in its own
+// container and verifies the full primary→secondary flow over a shared docker network:
+// (1) BIND transfers the zone from PowerDNS+pe3 via AXFR on startup and serves it, and
+// (2) after the zone changes in etcd, the secondary picks up the update (via NOTIFY —
+// pdns_control notify-host — and/or the SOA refresh).
+func TestPDNSAXFRSecondary(t *testing.T) {
+	defer recoverPanicsT(t)
+	ctx := context.Background()
+	// shared network so the primary (PowerDNS) and the secondary (BIND) can reach each other
+	nw, err := network.New(ctx)
+	fatalOnErr(t, "create docker network", err)
+	defer func() { _ = nw.Remove(ctx) }()
+	netName := nw.Name
+
+	etcd, err := startETCD(t)
+	fatalOnErr(t, "start ETCD container", err)
+	defer etcd.Terminate()
+	sleepT(t, 1*time.Second)
+	pe3 := startPE3(t, etcd.Endpoint, "", "-log-level=10;data.values=2", "-pdns-version="+getenvT("PDNS_VERSION", fmt.Sprintf("%d", defaultPdnsVersion))[:1])
+	defer pe3.Terminate()
+	fatalOnErr(t, "wait for PE3 ready", waitFor(t, "PE3 ready", func() bool { return status.serving }, 10*time.Millisecond, 30*time.Second))
+	sleepT(t, 1*time.Second)
+
+	// seed example.net. with a short SOA refresh so the secondary re-checks the serial quickly
+	put := func(key, value string) clientv3.Op { return putOp(pe3.Prefix+key, value) }
+	rev := txnT(t,
+		put("-defaults-", `{ttl: "1h"}`),
+		put("-defaults-/SOA", "---\nrefresh: 10s\nretry: 10s\nexpire: 604800\nneg-ttl: 10m\nprimary: ns1\nmail: horst.master\n"),
+		put("net.example/-options-/A", `{"ip-prefix": [192, 0, 2]}`),
+		put("net.example/SOA", `{}`),
+		put("net.example/NS#first", `="ns1"`),
+		put("net.example/ns1/A", `=2`), // ns1.example.net. A 192.0.2.2
+		put("net.example/www/A", `=1`), // www.example.net. A 192.0.2.1
+	)
+	waitForRevision(t, rev, "zone data loaded")
+
+	// primary: PowerDNS + pe3, AXFR allowed, primary mode, joined to the shared network
+	pdns, err := startPDNS(t, map[string]string{
+		"allow-axfr-ips=0.0.0.0/0,::/0":                   "34",
+		primaryModeSetting(getenvT("PDNS_VERSION", "50")): "34",
+	}, map[string][]string{netName: {"primary"}})
+	fatalOnErr(t, "start PDNS container", err)
+	defer pdns.Terminate()
+	primaryIP := containerIPOnNetwork(t, pdns.Container, netName)
+	Logf(t, "primary (PowerDNS) IP on %s: %s", netName, primaryIP)
+
+	// secondary: BIND9 slaving example.net. from the primary
+	bind, err := startBindSecondary(t, netName, primaryIP, "example.net.")
+	fatalOnErr(t, "start BIND secondary", err)
+	defer bind.Terminate()
+	Logf(t, "secondary (BIND) endpoint: %s", bind.Endpoint)
+
+	queryA := func(name string) (*dns.Msg, error) {
+		m := new(dns.Msg)
+		m.SetQuestion(name, dns.TypeA)
+		c := &dns.Client{Net: "tcp", Timeout: 5 * time.Second}
+		r, _, e := c.Exchange(m, bind.Endpoint)
+		return r, e
+	}
+
+	// (1) initial AXFR-in: poll the secondary until it serves the transferred zone
+	fatalOnErr(t, "secondary serves zone after initial AXFR",
+		waitFor(t, "secondary served www.example.net after AXFR", func() bool {
+			r, e := queryA("www.example.net.")
+			return e == nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0
+		}, 500*time.Millisecond, 30*time.Second))
+	r, e := queryA("www.example.net.")
+	fatalOnErr(t, "query secondary for www", e)
+	if a, ok := r.Answer[0].(*dns.A); !ok || a.A.String() != "192.0.2.1" {
+		Errorf(t, "secondary served wrong A for www.example.net: %v", r.Answer)
+	} else {
+		Logf(t, "secondary correctly serves the transferred zone (www.example.net. A %s)", a.A)
+	}
+
+	// (2) update propagation: add a record (bumps the serial), notify the secondary, expect re-transfer
+	rev2 := txnT(t, put("net.example/www2/A", `=3`)) // www2.example.net. A 192.0.2.3
+	waitForRevision(t, rev2, "updated zone data loaded")
+	secondaryIP := containerIPOnNetwork(t, bind.Container, netName)
+	if code, _, e := pdns.Container.Exec(ctx, []string{"pdns_control", "notify-host", "example.net", secondaryIP}); e != nil || code != 0 {
+		Logf(t, "pdns_control notify-host returned code=%d err=%v (falling back to SOA refresh)", code, e)
+	} else {
+		Logf(t, "sent NOTIFY to secondary %s via pdns_control notify-host", secondaryIP)
+	}
+	fatalOnErr(t, "secondary picked up the update",
+		waitFor(t, "secondary served www2.example.net after update", func() bool {
+			r, e := queryA("www2.example.net.")
+			return e == nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0
+		}, 500*time.Millisecond, 40*time.Second))
+	Logf(t, "secondary picked up the update (www2.example.net. present)")
 }
