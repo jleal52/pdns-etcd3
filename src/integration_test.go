@@ -955,6 +955,175 @@ func TestPDNSAXFR(t *testing.T) {
 	}
 }
 
+// TestPDNSAXFRPresigned proves a PRE-SIGNED DNSSEC zone transfers over AXFR with its
+// DNSSEC records intact: the AXFR envelope must contain the stored *dns.DNSKEY and
+// *dns.RRSIG records (plus the bracketing SOA), and the served SOA serial must equal
+// the pinned X-PE3-FIXED-SERIAL. It is a close variant of TestPDNSAXFR.
+//
+// Naming: the test MUST be prefixed "TestPDNS" so CI's `-run PDNS` matrix job runs it
+// across the PDNS-version matrix; an unprefixed name would be silently skipped.
+//
+// What pe3 does (and what this test exercises): pe3 does NOT sign anything. The signed
+// records (DNSKEY/RRSIG/NSEC) are stored in etcd as ordinary plain-string entries under
+// their name + qtype; these qtypes are not object-supported and have no plain-string
+// parser, so their content is passed through to PowerDNS VERBATIM (see
+// doc/ETCD-structure.md "Pre-signed DNSSEC" and data.go::processValuesEntry, which calls
+// SetContent on the raw string for unparsed qtypes). The PRESIGNED=1 metadata tells
+// PowerDNS to serve those RRSIG/NSEC/DNSKEY records as-is instead of signing on the fly,
+// and X-PE3-FIXED-SERIAL pins the SOA serial so it matches the value a real signer would
+// have baked into RRSIG(SOA).
+//
+// ASSUMPTIONS (validated by CI; documented per task requirements):
+//  1. The DNSSEC RDATA strings below are cryptographically DUMMY but
+//     SYNTACTICALLY VALID presentation format. This is sufficient because the task only
+//     requires that the records transfer intact — cryptographic validation by a secondary
+//     is NOT required. pe3 stores/serves them verbatim and PowerDNS forwards them as-is
+//     over AXFR; no signature is verified anywhere in this path. (The strings were
+//     verified to round-trip through miekg/dns — the same parser the test client uses —
+//     into *dns.DNSKEY / *dns.RRSIG / *dns.NSEC.)
+//  2. For the REMOTE backend, marking a zone presigned is done entirely via the
+//     getDomainMetadata passthrough: PRESIGNED=1 is returned to PowerDNS, which then
+//     serves backend-supplied DNSSEC records. No server-level "dnssec" pdns.conf option
+//     gates presigned AXFR for the remote backend (presigned-ness is per-zone metadata),
+//     so none is added. Metadata caching is already disabled in startPDNS, so PowerDNS
+//     consults the PRESIGNED metadata fresh.
+//  3. All DNSSEC RDATA strings here begin with an alphanumeric character (a digit for
+//     DNSKEY, a letter for RRSIG/NSEC), so they are safe as plain strings without the
+//     backtick marker (per the ETCD-structure warning about non-alphanumeric leading
+//     characters).
+//
+// First failure mode if an assumption is wrong (what CI tells us): if PowerDNS needs more
+// than PRESIGNED metadata to serve a presigned zone over AXFR (e.g. it drops the
+// RRSIG/DNSKEY records), the DNSKEY/RRSIG assertions below fail with a clear message.
+func TestPDNSAXFRPresigned(t *testing.T) {
+	defer recoverPanicsT(t)
+	// The serial baked into RRSIG(SOA) by a (hypothetical) signer; pe3 must serve exactly
+	// this as the SOA serial via X-PE3-FIXED-SERIAL so the answer stays self-consistent.
+	const fixedSerial uint32 = 2026061601
+	// ETCD
+	etcd, err := startETCD(t)
+	fatalOnErr(t, "start ETCD container", err)
+	defer etcd.Terminate()
+	Logf(t, "ETCD endpoint (2379): %s", etcd.Endpoint)
+	// PDNS-ETCD3
+	sleepT(t, 1*time.Second)
+	pe3 := startPE3(t, etcd.Endpoint, "", "-log-level=10;data.values=2", "-pdns-version="+getenvT("PDNS_VERSION", fmt.Sprintf("%d", defaultPdnsVersion))[:1])
+	defer pe3.Terminate()
+	Logf(t, "PDNS-ETCD3 endpoint: %s", pe3.HttpAddress)
+	err = waitFor(t, "PE3 ready", func() bool { return status.serving }, 10*time.Millisecond, 30*time.Second)
+	fatalOnErr(t, "wait for PE3 ready", err)
+	sleepT(t, 1*time.Second)
+	// seed zone example.net. (same shape as TestPDNSAXFR) PLUS pre-signed DNSSEC records
+	// stored verbatim, plus PRESIGNED + X-PE3-FIXED-SERIAL metadata.
+	put := func(key, value string) clientv3.Op {
+		return putOp(pe3.Prefix+key, value)
+	}
+	// Dummy-but-syntactically-valid DNSSEC RDATA (presentation format, content only — the
+	// owner/class/type/ttl come from the etcd key + default ttl). Verified to round-trip
+	// through miekg/dns into the corresponding *dns.* types.
+	const (
+		// DNSKEY: flags=257 (KSK) protocol=3 algorithm=8 (RSASHA256) publickey(base64)
+		dnskeyRDATA = "257 3 8 AwEAAcKvAYr0Z8h3hZ3cQv0p9Wb0nKZ3sZ1jKpV3pQ8mC2x1aXQ9pZ4dN0kT8xY7vL5wRb2cF0aG6hJ4mN8pQ2sT5uW7yZ0bD3eF6gH8iJ1kL3mN5oP7qR9sT2uV4wX6yZ8aB0cD2eF4gH6iJ8kL0mN2oP4qR6sT8uV0w"
+		// RRSIG covering SOA: type-covered algo labels orig-ttl expiration inception keytag signer signature(base64)
+		rrsigSOA = "SOA 8 2 3600 20270101000000 20260101000000 12345 example.net. abcdefABCDEF0123456789+/aGdHjKlMnOpQrStUvWxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefABCDEFGHIJKLMNOPqrstuvwxYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQ="
+		// RRSIG covering the apex DNSKEY RRset
+		rrsigDNSKEY = "DNSKEY 8 2 3600 20270101000000 20260101000000 12345 example.net. ZZZZdefABCDEF0123456789+/aGdHjKlMnOpQrStUvWxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefABCDEFGHIJKLMNOPqrstuvwxYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQ="
+		// RRSIG covering www's A RRset (labels=3 for www.example.net.)
+		rrsigA = "A 8 3 3600 20270101000000 20260101000000 12345 example.net. YYYYdefABCDEF0123456789+/aGdHjKlMnOpQrStUvWxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefABCDEFGHIJKLMNOPqrstuvwxYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQ="
+		// NSEC at the apex (next name + covered types)
+		nsecApex = "www.example.net. A NS SOA RRSIG NSEC DNSKEY"
+	)
+	rev := txnT(t,
+		put("-defaults-", `{ttl: "1h"}`),
+		put("-defaults-/SOA", "---\nrefresh: 1h\nretry: 30m\nexpire: 604800\nneg-ttl: 10m\nprimary: ns1\nmail: horst.master\n"),
+		put("net.example/-options-/A", `{"ip-prefix": [192, 0, 2]}`),
+		put("net.example/SOA", `{}`),
+		put("net.example/NS#first", `="ns1"`),
+		put("net.example/ns1/A", `=2`), // ns1.example.net. A 192.0.2.2
+		put("net.example/www/A", `=1`), // www.example.net. A 192.0.2.1
+		// pre-signed DNSSEC records (stored verbatim; not object-supported, no parser).
+		put("net.example/DNSKEY", dnskeyRDATA),       // example.net. DNSKEY
+		put("net.example/RRSIG#soa", rrsigSOA),       // example.net. RRSIG (SOA)
+		put("net.example/RRSIG#dnskey", rrsigDNSKEY), // example.net. RRSIG (DNSKEY)
+		put("net.example/NSEC", nsecApex),            // example.net. NSEC
+		put("net.example/www/RRSIG", rrsigA),         // www.example.net. RRSIG (A)
+		// metadata: mark the zone presigned and pin the SOA serial to the signer's value.
+		put("net.example/"+metadataKey+keySeparator+"PRESIGNED#1", "1"),
+		put("net.example/"+metadataKey+keySeparator+MetaFixedSerial+"#1", strconv.FormatUint(uint64(fixedSerial), 10)),
+	)
+	waitForRevision(t, rev, "presigned zone data loaded")
+	// PDNS primary mode with AXFR-OUT enabled (same gating as TestPDNSAXFR). PRESIGNED is
+	// delivered via the getdomainmetadata passthrough — no extra server setting needed.
+	pdns, err := startPDNS(t, map[string]string{
+		"allow-axfr-ips=0.0.0.0/0,::/0": "34",
+		"master=yes":                    "34",
+		"primary=yes":                   "45",
+	})
+	fatalOnErr(t, "start PDNS container", err)
+	defer pdns.Terminate()
+	Logf(t, "PDNS endpoint: %s", pdns.Endpoint)
+	// perform the AXFR
+	zone := "example.net."
+	tr := &dns.Transfer{
+		DialTimeout: 10 * time.Second,
+		ReadTimeout: 10 * time.Second,
+	}
+	m := new(dns.Msg)
+	m.SetAxfr(zone)
+	ch, err := tr.In(m, pdns.Endpoint)
+	fatalOnErr(t, "start AXFR", err)
+	var rrs []dns.RR
+	for env := range ch {
+		if env.Error != nil {
+			Fatalf(t, "AXFR envelope error: %s", env.Error)
+		}
+		rrs = append(rrs, env.RR...)
+	}
+	Logf(t, "AXFR transferred %d RRs", len(rrs))
+	for _, rr := range rrs {
+		Logf(t, "  %s", rr)
+	}
+	// assertions
+	if len(rrs) < 2 {
+		Fatalf(t, "AXFR returned too few records: %d", len(rrs))
+	}
+	if _, ok := rrs[0].(*dns.SOA); !ok {
+		Errorf(t, "AXFR must start with SOA, got %s", rrs[0])
+	}
+	if _, ok := rrs[len(rrs)-1].(*dns.SOA); !ok {
+		Errorf(t, "AXFR must end with SOA, got %s", rrs[len(rrs)-1])
+	}
+	var soaCount, dnskeyCount, rrsigCount int
+	var serialOK bool
+	for _, rr := range rrs {
+		switch v := rr.(type) {
+		case *dns.SOA:
+			soaCount++
+			if v.Serial == fixedSerial {
+				serialOK = true
+			} else {
+				Errorf(t, "SOA serial mismatch: got %d, want pinned X-PE3-FIXED-SERIAL %d", v.Serial, fixedSerial)
+			}
+		case *dns.DNSKEY:
+			dnskeyCount++
+		case *dns.RRSIG:
+			rrsigCount++
+		}
+	}
+	if soaCount < 2 {
+		Errorf(t, "expected at least 2 SOA records (start+end), got %d", soaCount)
+	}
+	if !serialOK {
+		Errorf(t, "no SOA carried the pinned serial %d", fixedSerial)
+	}
+	if dnskeyCount < 1 {
+		Errorf(t, "expected at least one DNSKEY record in presigned AXFR, got %d", dnskeyCount)
+	}
+	if rrsigCount < 1 {
+		Errorf(t, "expected at least one RRSIG record in presigned AXFR, got %d", rrsigCount)
+	}
+}
+
 // TestPDNSAXFRTSIG proves TSIG-secured AXFR end-to-end: a TSIG-signed transfer
 // SUCCEEDS, and an UNSIGNED transfer is REFUSED when access is gated only by TSIG
 // (no allow-axfr-ips). It is a close variant of TestPDNSAXFR.
