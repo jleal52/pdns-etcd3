@@ -54,6 +54,7 @@ const (
 	optionsKey       = "-options-"
 	metadataKey      = "-metadata-"
 	lockKey          = "-lock-"
+	tsigKey          = "-tsig-"
 	keySeparator     = "/"
 	labelPrefix      = "+"
 	idSeparator      = "#"

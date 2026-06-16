@@ -228,6 +228,30 @@ func TestProcessValues(t *testing.T) {
 	})
 }
 
+func TestParseTSIGEntryKey(t *testing.T) {
+	prefix := ""
+	args = programArgs{Prefix: &prefix}
+	name, et, qtype, id, _, err := parseEntryKey("-tsig-/xfrkey")
+	if err != nil {
+		Fatalf(t, "unexpected error: %s", err)
+	}
+	if et != tsigEntry {
+		Errorf(t, "entryType = %q, want tsig", et)
+	}
+	if id != "xfrkey" {
+		Errorf(t, "id = %q, want xfrkey", id)
+	}
+	if len(name) != 0 || qtype != "" {
+		Errorf(t, "name/qtype should be empty: %v %q", name, qtype)
+	}
+	// dotted key names must survive verbatim
+	if _, _, _, dottedID, _, err := parseEntryKey("-tsig-/xfr.example.com"); err != nil {
+		Errorf(t, "unexpected error for dotted key: %s", err)
+	} else if dottedID != "xfr.example.com" {
+		Errorf(t, "dotted id = %q, want xfr.example.com", dottedID)
+	}
+}
+
 func TestAllDomainsReportsKindAndID(t *testing.T) {
 	zoneIDs = newZoneRegistry()
 	apex := newDataNode(nil, "example", "", false)

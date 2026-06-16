@@ -38,6 +38,7 @@ const (
 	optionsEntry  entryType = "options"
 	metadataEntry entryType = "metadata"
 	lockEntry     entryType = "lock"
+	tsigEntry     entryType = "tsig"
 )
 
 var (
@@ -46,6 +47,7 @@ var (
 		optionsKey:  optionsEntry,
 		metadataKey: metadataEntry,
 		lockKey:     lockEntry,
+		tsigKey:     tsigEntry,
 	}
 )
 

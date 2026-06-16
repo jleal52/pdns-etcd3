@@ -408,6 +408,10 @@ func parseEntryKey(key string) (name Name, entryType entryType, qtype, id string
 	case lockEntry:
 		id = key
 		return
+	case tsigEntry:
+		// the remainder after "-tsig-/" is the key name (may contain dots)
+		id = key
+		return
 	default:
 		err = fmt.Errorf("unhandled entry type: %q", entryType)
 		return
@@ -495,6 +499,12 @@ ITEMS:
 		}
 		if entryType == lockEntry {
 			debug3("ignoring lock entry")(item.Key)
+			continue ITEMS
+		}
+		if entryType == tsigEntry {
+			// TSIG keys are read on demand, never stored in the data tree, and must
+			// not influence any zone serial → skip before the maxRev update below.
+			debug3("ignoring tsig entry")(item.Key)
 			continue ITEMS
 		}
 		// check if the entry belongs to this domain
