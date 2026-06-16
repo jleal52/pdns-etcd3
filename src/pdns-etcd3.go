@@ -245,6 +245,10 @@ func (cr *pdnsClientRequest) handleRequest(ctx context.Context) {
 		result = dataRoot.updatedDomains([]domainInfo{})
 	case "setnotified":
 		result, err = cr.setNotified()
+	case "gettsigkey":
+		result, err = cr.getTSIGKey()
+	case "gettsigkeys":
+		result, err = cr.getTSIGKeys()
 	default:
 		result, err = false, fmt.Errorf("unknown/unimplemented request: %s", val2str(cr.Request))
 	}
