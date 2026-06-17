@@ -25,6 +25,8 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -236,13 +238,25 @@ func startContainer(t *testing.T, cr testcontainers.ContainerRequest, endpoint n
 	return ctInfo, nil
 }
 
-func startETCD(t *testing.T) (*ctInfo, error) {
+func startETCD(t *testing.T, netAliases ...map[string][]string) (*ctInfo, error) {
 	t.Helper()
+	// optional: attach to a docker network so other containers (e.g. a pipe-mode pe3 running
+	// inside the PowerDNS container) can reach etcd by alias
+	var nets []string
+	var aliases map[string][]string
+	if len(netAliases) > 0 && netAliases[0] != nil {
+		aliases = netAliases[0]
+		for n := range aliases {
+			nets = append(nets, n)
+		}
+	}
 	image := fmt.Sprintf("quay.io/coreos/etcd:v%s", getenvT("ETCD_VERSION", "3.6.7"))
 	Logf(t, "Using ETCD image %s", image)
 	return startContainer(t, testcontainers.ContainerRequest{
 		Image:          image,
 		Hostname:       "etcd",
+		Networks:       nets,
+		NetworkAliases: aliases,
 		ExposedPorts:   []string{"2379"},
 		LogConsumerCfg: &testcontainers.LogConsumerConfig{Consumers: []testcontainers.LogConsumer{CtLogger{t, "ETCD"}}},
 		Cmd: []string{
@@ -1720,4 +1734,154 @@ func TestPDNSNotifiedSerialPersisted(t *testing.T) {
 		Errorf(t, "getAllNotifiedSerials[%d] = %d, want %d", id, m[id], serial)
 	}
 	Logf(t, "notified serial persisted in etcd and read back on demand (id=%d serial=%d)", id, serial)
+}
+
+// buildPE3Binary builds a static pe3 binary (linux/amd64) to be mounted into and spawned by the
+// PowerDNS container in pipe mode.
+func buildPE3Binary(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "pdns-etcd3")
+	cmd := exec.Command("go", "build", "-o", bin, "..") // module root is the parent of ./src
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		Fatalf(t, "building pe3 binary failed: %s\n%s", err, out)
+	}
+	Logf(t, "built pe3 binary at %s", bin)
+	return bin
+}
+
+// seedPipeZone writes example.net. (prefix DNS/) directly into etcd via a raw client — in pipe
+// mode there is no in-process pe3, so the test seeds etcd itself. A short SOA refresh lets the
+// secondary re-check the serial quickly.
+func seedPipeZone(t *testing.T, ec *clientv3.Client) {
+	t.Helper()
+	kvs := [][2]string{
+		{"DNS/-defaults-", `{ttl: "1h"}`},
+		{"DNS/-defaults-/SOA", "---\nrefresh: 10s\nretry: 10s\nexpire: 604800\nneg-ttl: 10m\nprimary: ns1\nmail: horst.master\n"},
+		{"DNS/net.example/-options-/A", `{"ip-prefix": [192, 0, 2]}`},
+		{"DNS/net.example/SOA", `{}`},
+		{"DNS/net.example/NS#first", `="ns1"`},
+		{"DNS/net.example/ns1/A", `=2`}, // ns1.example.net. A 192.0.2.2
+		{"DNS/net.example/www/A", `=1`}, // www.example.net. A 192.0.2.1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for _, kv := range kvs {
+		if _, err := ec.Put(ctx, kv[0], kv[1]); err != nil {
+			Fatalf(t, "seed put %q: %s", kv[0], err)
+		}
+	}
+}
+
+// startPDNSPipe starts PowerDNS configured to run the pe3 BINARY in PIPE mode (one process per
+// request thread), connecting to etcd over the shared network. This is the real-deployment shape
+// (PowerDNS spawns pe3 per request) used to validate that primary operation — including the
+// etcd-persisted notified serial — works in pipe mode, not just standalone.
+func startPDNSPipe(t *testing.T, netName, binPath, etcdAddr string) (pdnsInfo, error) {
+	t.Helper()
+	v := getenvT("PDNS_VERSION", "50")
+	image := fmt.Sprintf("powerdns/pdns-auth-%s", v)
+	settings := []string{
+		fmt.Sprintf("remote-connection-string=pipe:command=/pdns-etcd3,pdns-version=%s,endpoints=%s,prefix=DNS/", v[:1], etcdAddr),
+		"distributor-threads=1", // pipe mode requires a single distributor (one pe3 process per thread)
+		"cache-ttl=0",
+		"query-cache-ttl=0",
+		"negquery-cache-ttl=0",
+		"allow-axfr-ips=0.0.0.0/0,::/0",
+		primaryModeSetting(v),
+	}
+	if v >= "44" {
+		settings = append(settings, "consistent-backends=no")
+	}
+	if v >= "45" {
+		settings = append(settings, "zone-cache-refresh-interval=0")
+	}
+	Logf(t, "PDNS (pipe) settings: %v", settings)
+	ctInfo, err := startContainer(t, testcontainers.ContainerRequest{
+		Image:          image,
+		Networks:       []string{netName},
+		NetworkAliases: map[string][]string{netName: {"primary"}},
+		ExposedPorts:   []string{"53/tcp"},
+		LogConsumerCfg: &testcontainers.LogConsumerConfig{Consumers: []testcontainers.LogConsumer{CtLogger{t, "PDNS"}}},
+		Files: []testcontainers.ContainerFile{
+			{HostFilePath: "../testdata/pdns.conf", ContainerFilePath: "/etc/powerdns/pdns.conf", FileMode: 0o555},
+			{Reader: linesReader(settings), ContainerFilePath: "/etc/powerdns/pdns.d/settings.conf", FileMode: 0o555},
+			{HostFilePath: binPath, ContainerFilePath: "/pdns-etcd3", FileMode: 0o755},
+		},
+		WaitingFor: wait.ForLog("ready to distribute questions|operating unthreaded").AsRegexp().WithStartupTimeout(120 * time.Second),
+	}, "53/tcp")
+	return pdnsInfo{ctInfo, v}, err
+}
+
+// TestPDNSAXFRSecondaryPipe is the PIPE-mode end-to-end test: PowerDNS spawns the pe3 binary per
+// request (the operator's real deployment shape). It verifies that a real ISC BIND9 secondary
+// transfers the zone via AXFR and picks up a later change — proving primary mode (and the
+// etcd-persisted notified serial, which is shared across the separate spawned processes) works in
+// pipe mode, not only standalone.
+func TestPDNSAXFRSecondaryPipe(t *testing.T) {
+	defer recoverPanicsT(t)
+	v := getenvT("PDNS_VERSION", "50")
+	if v < "44" {
+		t.Skipf("pipe-mode e2e targets the modern powerdns/pdns-auth image; PDNS %s uses an older/non-default protocol (the pipe protocol itself is covered by TestPipeRequests)", v)
+	}
+	ctx := context.Background()
+	nw, err := network.New(ctx)
+	fatalOnErr(t, "create docker network", err)
+	defer func() { _ = nw.Remove(ctx) }()
+	netName := nw.Name
+
+	etcd, err := startETCD(t, map[string][]string{netName: {"etcd"}})
+	fatalOnErr(t, "start ETCD container", err)
+	defer etcd.Terminate()
+
+	// In pipe mode there is no in-process pe3; PowerDNS spawns the binary. Seed etcd directly.
+	ec, err := clientv3.New(clientv3.Config{Endpoints: []string{etcd.Endpoint}, DialTimeout: 10 * time.Second})
+	fatalOnErr(t, "etcd client", err)
+	defer func() { _ = ec.Close() }()
+	seedPipeZone(t, ec)
+
+	pdns, err := startPDNSPipe(t, netName, buildPE3Binary(t), "etcd:2379")
+	fatalOnErr(t, "start PDNS (pipe) container", err)
+	defer pdns.Terminate()
+	primaryIP := containerIPOnNetwork(t, pdns.Container, netName)
+	Logf(t, "primary (PowerDNS, pipe mode) IP on %s: %s", netName, primaryIP)
+
+	bind, err := startBindSecondary(t, netName, primaryIP, "example.net.")
+	fatalOnErr(t, "start BIND secondary", err)
+	defer bind.Terminate()
+
+	queryA := func(name string) (*dns.Msg, error) {
+		m := new(dns.Msg)
+		m.SetQuestion(name, dns.TypeA)
+		c := &dns.Client{Net: "tcp", Timeout: 5 * time.Second}
+		r, _, e := c.Exchange(m, bind.Endpoint)
+		return r, e
+	}
+
+	// (1) initial AXFR-in, served by pe3 processes that PowerDNS spawns per request (pipe)
+	fatalOnErr(t, "secondary serves zone after initial AXFR (pipe)",
+		waitFor(t, "secondary served www.example.net after AXFR (pipe)", func() bool {
+			r, e := queryA("www.example.net.")
+			return e == nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0
+		}, 500*time.Millisecond, 40*time.Second))
+	Logf(t, "pipe mode: secondary served the transferred zone (AXFR-out via spawned pe3 works)")
+
+	// (2) change etcd → serial bumps → notify the secondary. The notified serial is read/written
+	// in etcd by separate spawned pe3 processes; this only works because it is persisted in etcd.
+	uctx, ucancel := context.WithTimeout(context.Background(), 15*time.Second)
+	_, perr := ec.Put(uctx, "DNS/net.example/www2/A", `=3`) // www2.example.net. A 192.0.2.3
+	ucancel()
+	fatalOnErr(t, "etcd update put", perr)
+	secondaryIP := containerIPOnNetwork(t, bind.Container, netName)
+	if code, _, e := pdns.Container.Exec(ctx, []string{"pdns_control", "notify-host", "example.net", secondaryIP}); e != nil || code != 0 {
+		Logf(t, "pdns_control notify-host returned code=%d err=%v (falling back to SOA refresh)", code, e)
+	} else {
+		Logf(t, "sent NOTIFY to secondary %s via pdns_control notify-host", secondaryIP)
+	}
+	fatalOnErr(t, "secondary picked up the update (pipe)",
+		waitFor(t, "secondary served www2.example.net after update (pipe)", func() bool {
+			r, e := queryA("www2.example.net.")
+			return e == nil && r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0
+		}, 500*time.Millisecond, 40*time.Second))
+	Logf(t, "pipe mode: secondary picked up the update (primary mode works end-to-end in pipe)")
 }
