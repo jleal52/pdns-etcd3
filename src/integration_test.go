@@ -877,8 +877,18 @@ func primaryModeSetting(pdnsVersion string) string {
 	return "primary=yes"
 }
 
+// skipIfPDNSBelow40 skips AXFR tests on PowerDNS < 4.0: AXFR-out via the remote-backend `list`
+// method is not supported on the legacy PowerDNS 3.4 protocol (only the bracketing SOA is sent).
+func skipIfPDNSBelow40(t *testing.T) {
+	t.Helper()
+	if v := getenvT("PDNS_VERSION", "50"); v < "40" {
+		t.Skipf("AXFR-out via the remote-backend list method needs PowerDNS 4.0+; PDNS %s uses the legacy protocol", v)
+	}
+}
+
 func TestPDNSAXFR(t *testing.T) {
 	defer recoverPanicsT(t)
+	skipIfPDNSBelow40(t)
 	// ETCD
 	etcd, err := startETCD(t)
 	fatalOnErr(t, "start ETCD container", err)
@@ -1032,6 +1042,7 @@ func TestPDNSAXFR(t *testing.T) {
 // RRSIG/DNSKEY records), the DNSKEY/RRSIG assertions below fail with a clear message.
 func TestPDNSAXFRPresigned(t *testing.T) {
 	defer recoverPanicsT(t)
+	skipIfPDNSBelow40(t)
 	// The serial baked into RRSIG(SOA) by a (hypothetical) signer; pe3 must serve exactly
 	// this as the SOA serial via X-PE3-FIXED-SERIAL so the answer stays self-consistent.
 	const fixedSerial uint32 = 2026061601
@@ -1183,6 +1194,7 @@ func TestPDNSAXFRPresigned(t *testing.T) {
 // one form is consulted, the other seed is simply unused.
 func TestPDNSAXFRTSIG(t *testing.T) {
 	defer recoverPanicsT(t)
+	skipIfPDNSBelow40(t)
 	// TSIG material: a fixed, valid HMAC-SHA256 secret (base64 of exactly 32 bytes).
 	const (
 		tsigKeyName = "axfrkey."                                     // canonical FQDN, used identically in all 3 places
@@ -1621,6 +1633,7 @@ zone "%s" {
 // pdns_control notify-host — and/or the SOA refresh).
 func TestPDNSAXFRSecondary(t *testing.T) {
 	defer recoverPanicsT(t)
+	skipIfPDNSBelow40(t)
 	ctx := context.Background()
 	// shared network so the primary (PowerDNS) and the secondary (BIND) can reach each other
 	nw, err := network.New(ctx)

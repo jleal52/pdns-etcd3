@@ -93,7 +93,7 @@ the fourth development release, considered alpha quality. Any testing is appreci
 
 ### Overview over the support of optional [PDNS features in a remote backend][pdns-remote]:
 * Primary (master): yes — see [Primary mode (AXFR zone transfer)](#primary-mode-axfr-zone-transfer)
-  * AXFR support: yes (`list` method), with IP and/or TSIG ACL
+  * AXFR support: yes (`list` method), with IP and/or TSIG ACL — requires PowerDNS 4.0+ (the legacy 3.4 remote-backend protocol does not support AXFR-out)
   * automatic NOTIFY: yes, in any run mode (the notified serial is persisted in ETCD)
 * (Auto)Secondary: no
 * DNSSEC: pre-signed yes, live-signing not yet (planned feature)
