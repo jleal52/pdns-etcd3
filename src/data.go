@@ -375,8 +375,10 @@ func parseEntryKey(key string) (name Name, entryType entryType, qtype, id string
 				switch qtype {
 				case "A", "AAAA", "ALIAS", "CNAME", "DNAME", "MX", "NS", "PTR", "SOA": // TODO add others, even not-supported ones?
 					for _, lname := range name {
-						if strings.ContainsRune(lname.name, '_') {
-							err = fmt.Errorf("records for hostnames may not have underscores: %q", lname.name)
+						// a single leading underscore is allowed (RFC 8552 underscored
+						// node names, e.g. _domainkey for delegated DKIM CNAMEs)
+						if strings.ContainsRune(strings.TrimPrefix(lname.name, "_"), '_') {
+							err = fmt.Errorf("records for hostnames may not have underscores (except a single leading one): %q", lname.name)
 							return
 						}
 					}

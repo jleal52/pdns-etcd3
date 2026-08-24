@@ -57,7 +57,12 @@ func TestParseEntryKey(t *testing.T) {
 		{"com.example/dept.fin/-defaults-/NS#1@2.3", ve[pk]{v: pk{[]namePart{{"com", ""}, {"example", "."}, {"dept", "/"}, {"fin", "."}}, "defaults", "NS", "1", &VersionType{false, 2, 3, 0}}}},
 		{"SOA#id", ve[pk]{e: "SOA entry cannot have an id"}},
 		{"miXed-CaSe", ve[pk]{e: "invalid key"}},
-		// TODO add way more tests (e.g. names with underscores, wildcard, more entry types, ...)
+		{"com.example/_domainkey.selector1/CNAME", ve[pk]{v: pk{[]namePart{{"com", ""}, {"example", "."}, {"_domainkey", "/"}, {"selector1", "."}}, "normal", "CNAME", "", nil}}},
+		{"com.example/foo_bar/CNAME", ve[pk]{e: "underscore"}},
+		{"com.example/__x/CNAME", ve[pk]{e: "underscore"}},
+		{"es.shara/-metadata-/X-PE3-MINIMUM-SERIAL", ve[pk]{v: pk{[]namePart{{"es", ""}, {"shara", "."}}, "metadata", "X-PE3-MINIMUM-SERIAL", "", nil}}},
+		{"es.shara/-metadata-/ALLOW-AXFR-FROM#1", ve[pk]{v: pk{[]namePart{{"es", ""}, {"shara", "."}}, "metadata", "ALLOW-AXFR-FROM", "1", nil}}},
+		// TODO add way more tests (e.g. wildcard, more entry types, ...)
 	} {
 		checkRun(t, fmt.Sprintf("(%d)%q", i+1, spec.input), tf, spec.input, spec.expected, false)
 	}
