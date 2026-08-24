@@ -279,9 +279,19 @@ type pe3Info struct {
 	Prefix      string
 }
 
+// pe3HTTPPort returns the host port for the standalone HTTP listener. It is fixed
+// by default (also used in the remote-connection-string PDNS setting), but
+// PE3_TEST_HTTP_PORT overrides it for hosts where 8053 is already taken.
+func pe3HTTPPort() string {
+	if p := os.Getenv("PE3_TEST_HTTP_PORT"); p != "" {
+		return p
+	}
+	return "8053"
+}
+
 func startPE3(t *testing.T, etcdEndpoint, prefix string, moreArgs ...string) pe3Info {
 	t.Helper()
-	httpAddress, _ := url.Parse("http://0.0.0.0:8053") // the port is fixed, it is also used in remote-connection-string PDNS setting
+	httpAddress, _ := url.Parse("http://0.0.0.0:" + pe3HTTPPort())
 	doneCtx, done := context.WithCancel(context.Background())
 	osSignals := make(chan os.Signal, 1)
 	cli = new(etcdClient)
@@ -368,7 +378,7 @@ func startPDNS(t *testing.T, dynamicSettings map[string]string, netAliases ...ma
 		Fatalf(t, "invalid PDNS version: %q", v)
 	}
 	settings := []string{
-		fmt.Sprintf("remote-connection-string=http:url=http://host.docker.internal:8053/client-id=%013s/pdns-version=%s/,post=yes,post_json=yes,timeout=10000", strconv.FormatUint(rand.Uint64(), 32), v[:1]),
+		fmt.Sprintf("remote-connection-string=http:url=http://host.docker.internal:%s/client-id=%013s/pdns-version=%s/,post=yes,post_json=yes,timeout=10000", pe3HTTPPort(), strconv.FormatUint(rand.Uint64(), 32), v[:1]),
 		"cache-ttl=0",
 		"query-cache-ttl=0",
 		"negquery-cache-ttl=0",
